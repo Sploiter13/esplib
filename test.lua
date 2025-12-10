@@ -465,7 +465,7 @@ local function update_loop()
 		-- Swap render data (atomic operation)
 		render_data = new_render_data
 		
-		task_wait(0.1) -- Update 10 times per second
+		task_wait(0.04) -- Update 10 times per second
 	end
 end
 
