@@ -7,11 +7,13 @@ local pcall, pairs, ipairs = pcall, pairs, ipairs
 local task_wait, task_spawn = task.wait, task.spawn
 local table_find, table_insert, table_remove = table.find, table.insert, table.remove
 local string_format, string_lower = string.format, string.lower
-local math_floor, math_sqrt = math.floor, math.sqrt
+local math_floor, math_sqrt, math_min, math_max = math.floor, math.sqrt, math.min, math.max
+local math_huge = math.huge
 local vector_magnitude, vector_create = vector.magnitude, vector.create
 
 local game = game
 local workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
 ---- constants ----
@@ -19,9 +21,13 @@ local DEFAULT_CONFIG = {
 	enabled = true,
 	name_esp = true,
 	distance_esp = true,
-	box_esp = false,
+	box_esp = true,
 	health_bar = false,
 	tracers = false,
+	
+	-- Filtering
+	exclude_players = false, -- If true, excludes all player characters
+	auto_exclude_localplayer = true, -- Automatically exclude local player when path is workspace
 	
 	-- Colors
 	name_color = Color3.new(1, 1, 1),
@@ -45,9 +51,6 @@ local DEFAULT_CONFIG = {
 	fade_enabled = true,
 	fade_start = 500,
 	fade_end = 1000,
-	
-	-- Team check (if applicable)
-	ignore_team = false,
 }
 
 ---- variables ----
@@ -59,6 +62,8 @@ local camera = nil
 local render_connection = nil
 local update_connection = nil
 local config = {}
+local local_player = nil
+local local_character = nil
 
 ---- functions ----
 local function deep_copy(tbl: {[any]: any}): {[any]: any}
@@ -94,8 +99,59 @@ local function calculate_fade_opacity(distance: number): number
 	end
 end
 
+local function update_local_player()
+	local success = pcall(function()
+		local_player = Players.LocalPlayer
+		if local_player then
+			local_character = local_player.Character
+		end
+	end)
+	
+	if not success then
+		local_player = nil
+		local_character = nil
+	end
+end
+
+local function is_player_character(obj: Instance): boolean
+	-- Check if object is a player character
+	if not obj or obj.ClassName ~= "Model" then
+		return false
+	end
+	
+	local success, is_player = pcall(function()
+		for _, player in ipairs(Players:GetChildren()) do
+			if player.Character == obj then
+				return true
+			end
+		end
+		return false
+	end)
+	
+	return success and is_player
+end
+
+local function should_exclude_object(obj: Instance): boolean
+	-- Exclude local player character
+	if config.auto_exclude_localplayer and local_character and obj == local_character then
+		return true
+	end
+	
+	-- Exclude all players if configured
+	if config.exclude_players and is_player_character(obj) then
+		return true
+	end
+	
+	return false
+end
+
 local function should_track_object(obj: Instance): boolean
 	assert(typeof(obj) == "Instance", "invalid argument #1 (Instance expected)")
+	
+	-- Check if should exclude
+	if should_exclude_object(obj) then
+		return false
+	end
 	
 	local obj_name = obj.Name
 	
@@ -121,6 +177,93 @@ local function should_track_object(obj: Instance): boolean
 	end
 	
 	return true
+end
+
+local function get_all_parts(obj: Instance): {Instance}
+	local parts = {}
+	
+	local success = pcall(function()
+		if obj.ClassName:find("Part") then
+			table_insert(parts, obj)
+		elseif obj.ClassName == "Model" then
+			for _, child in ipairs(obj:GetDescendants()) do
+				if child.ClassName:find("Part") then
+					table_insert(parts, child)
+				end
+			end
+		end
+	end)
+	
+	return parts
+end
+
+local function calculate_bounding_box(parts: {Instance}): (vector?, vector?)
+	if #parts == 0 then
+		return nil, nil
+	end
+	
+	local min_x, min_y, min_z = math_huge, math_huge, math_huge
+	local max_x, max_y, max_z = -math_huge, -math_huge, -math_huge
+	
+	for _, part in ipairs(parts) do
+		local success = pcall(function()
+			local pos = part.Position
+			local size = part.Size
+			
+			-- Calculate part bounds
+			local half_size_x = size.X / 2
+			local half_size_y = size.Y / 2
+			local half_size_z = size.Z / 2
+			
+			min_x = math_min(min_x, pos.X - half_size_x)
+			min_y = math_min(min_y, pos.Y - half_size_y)
+			min_z = math_min(min_z, pos.Z - half_size_z)
+			
+			max_x = math_max(max_x, pos.X + half_size_x)
+			max_y = math_max(max_y, pos.Y + half_size_y)
+			max_z = math_max(max_z, pos.Z + half_size_z)
+		end)
+	end
+	
+	if min_x == math_huge then
+		return nil, nil
+	end
+	
+	return vector_create(min_x, min_y, min_z), vector_create(max_x, max_y, max_z)
+end
+
+local function get_bounding_box_corners(min_bound: vector, max_bound: vector): {vector}
+	return {
+		vector_create(min_bound.X, min_bound.Y, min_bound.Z), -- 1: bottom-front-left
+		vector_create(max_bound.X, min_bound.Y, min_bound.Z), -- 2: bottom-front-right
+		vector_create(max_bound.X, min_bound.Y, max_bound.Z), -- 3: bottom-back-right
+		vector_create(min_bound.X, min_bound.Y, max_bound.Z), -- 4: bottom-back-left
+		vector_create(min_bound.X, max_bound.Y, min_bound.Z), -- 5: top-front-left
+		vector_create(max_bound.X, max_bound.Y, min_bound.Z), -- 6: top-front-right
+		vector_create(max_bound.X, max_bound.Y, max_bound.Z), -- 7: top-back-right
+		vector_create(min_bound.X, max_bound.Y, max_bound.Z), -- 8: top-back-left
+	}
+end
+
+local function get_2d_bounding_box(corners_3d: {vector}): (vector, vector)
+	local min_x, min_y = math_huge, math_huge
+	local max_x, max_y = -math_huge, -math_huge
+	
+	for _, corner in ipairs(corners_3d) do
+		local screen_pos, visible = camera:WorldToScreenPoint(corner)
+		if visible then
+			min_x = math_min(min_x, screen_pos.X)
+			min_y = math_min(min_y, screen_pos.Y)
+			max_x = math_max(max_x, screen_pos.X)
+			max_y = math_max(max_y, screen_pos.Y)
+		end
+	end
+	
+	if min_x == math_huge then
+		return nil, nil
+	end
+	
+	return vector_create(min_x, min_y, 0), vector_create(max_x, max_y, 0)
 end
 
 local function get_object_position(obj: Instance): vector?
@@ -164,7 +307,7 @@ local function get_object_health(obj: Instance): (number?, number?)
 		return nil, nil
 	end
 	
-	local success, result = pcall(function()
+	local success, health, max_health = pcall(function()
 		local humanoid = obj:FindFirstChildOfClass("Humanoid")
 		if humanoid then
 			return humanoid.Health, humanoid.MaxHealth
@@ -173,7 +316,7 @@ local function get_object_health(obj: Instance): (number?, number?)
 	end)
 	
 	if success then
-		return result
+		return health, max_health
 	end
 	return nil, nil
 end
@@ -197,10 +340,16 @@ local function scan_path(path: Instance)
 			if not tracked_objects[obj_id] then
 				local position = get_object_position(obj)
 				if position then
+					local parts = get_all_parts(obj)
+					local min_bound, max_bound = calculate_bounding_box(parts)
+					
 					tracked_objects[obj_id] = {
 						object = obj,
 						name = obj.Name,
 						position = position,
+						parts = parts,
+						min_bound = min_bound,
+						max_bound = max_bound,
 						last_seen = os.clock(),
 					}
 				end
@@ -227,7 +376,7 @@ end
 
 local function update_loop()
 	while config.enabled do
-		-- Update camera reference
+		-- Update camera and local player
 		local success = pcall(function()
 			camera = workspace.CurrentCamera
 		end)
@@ -235,6 +384,8 @@ local function update_loop()
 		if not success then
 			camera = nil
 		end
+		
+		update_local_player()
 		
 		-- Scan all active paths
 		for _, path in ipairs(active_paths) do
@@ -263,12 +414,24 @@ local function render_loop()
 			continue
 		end
 		
-		-- Update position
+		-- Re-check exclusion (in case local player changed)
+		if should_exclude_object(obj) then
+			continue
+		end
+		
+		-- Update position and bounds
 		local pos = get_object_position(obj)
 		if not pos then
 			continue
 		end
 		data.position = pos
+		
+		-- Recalculate bounding box if needed
+		if not data.min_bound or not data.max_bound then
+			local parts = get_all_parts(obj)
+			data.parts = parts
+			data.min_bound, data.max_bound = calculate_bounding_box(parts)
+		end
 		
 		-- Calculate distance
 		local distance = calculate_distance(pos, cam_pos)
@@ -287,6 +450,23 @@ local function render_loop()
 		
 		if fade_opacity <= 0 then
 			continue
+		end
+		
+		-- Bounding Box ESP
+		if config.box_esp and data.min_bound and data.max_bound then
+			local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
+			local min_2d, max_2d = get_2d_bounding_box(corners)
+			
+			if min_2d and max_2d then
+				local box_size = max_2d - min_2d
+				DrawingImmediate.Rectangle(
+					min_2d,
+					box_size,
+					config.box_color,
+					config.box_opacity * fade_opacity,
+					config.box_thickness
+				)
+			end
 		end
 		
 		local y_offset = 0
@@ -340,20 +520,6 @@ local function render_loop()
 			end
 		end
 		
-		-- Box ESP
-		if config.box_esp then
-			local box_size = 2000 / distance
-			box_size = math.clamp(box_size, 20, 100)
-			
-			DrawingImmediate.Rectangle(
-				screen_pos - vector_create(box_size / 2, box_size, 0),
-				vector_create(box_size, box_size * 2, 0),
-				config.box_color,
-				config.box_opacity * fade_opacity,
-				config.box_thickness
-			)
-		end
-		
 		-- Tracers
 		if config.tracers then
 			local screen_center = camera.ViewportSize / 2
@@ -385,6 +551,9 @@ function ESP.new(settings: {[string]: any}?): typeof(ESP)
 			config[key] = value
 		end
 	end
+	
+	-- Initialize local player
+	update_local_player()
 	
 	return ESP
 end
