@@ -67,8 +67,7 @@ local update_connection = nil
 local config = {}
 local local_player = nil
 local local_character = nil
-local update_tick = 0
-local scan_tick = 0
+local frame_count = 0
 
 ---- functions ----
 local function deep_copy(tbl: {[any]: any}): {[any]: any}
@@ -370,14 +369,13 @@ local function cleanup_stale_objects()
 	end
 end
 
----- PostLocal update loop - ALL memory operations happen here ----
+---- PostLocal - Scanning and ALL calculations happen here EVERY FRAME ----
 local function update_loop()
 	if not config.enabled then
 		return
 	end
 	
-	update_tick = update_tick + 1
-	scan_tick = scan_tick + 1
+	frame_count = frame_count + 1
 	
 	-- Update camera reference every frame
 	local success = pcall(function()
@@ -392,14 +390,13 @@ local function update_loop()
 		camera = nil
 		camera_position = nil
 		viewport_size = nil
+		return
 	end
 	
 	update_local_player()
 	
 	-- Scan paths every 30 frames (~0.5 seconds at 60fps)
-	if scan_tick >= 30 then
-		scan_tick = 0
-		
+	if frame_count % 30 == 0 then
 		for _, path in ipairs(active_paths) do
 			if path and path.Parent then
 				scan_path(path)
@@ -409,64 +406,60 @@ local function update_loop()
 		cleanup_stale_objects()
 	end
 	
-	-- Pre-compute render data every frame
+	-- Calculate render data EVERY FRAME for smooth movement
 	local new_render_data = {}
 	
-	if camera and camera_position then
-		for obj_id, data in pairs(tracked_objects) do
-			local obj = data.object
-			if obj and obj.Parent then
-				if not should_exclude_object(obj) then
-					-- Update position
-					local pos = get_object_position(obj)
-					if pos then
-						data.position = pos
+	for obj_id, data in pairs(tracked_objects) do
+		local obj = data.object
+		if obj and obj.Parent then
+			if not should_exclude_object(obj) then
+				-- Update position every frame
+				local pos = get_object_position(obj)
+				if pos then
+					data.position = pos
+					
+					-- Recalculate bounding box every 60 frames
+					if frame_count % 60 == 0 then
+						local parts = get_all_parts(obj)
+						data.parts = parts
+						data.min_bound, data.max_bound = calculate_bounding_box(parts)
+					end
+					
+					-- Calculate distance
+					local distance = calculate_distance(pos, camera_position)
+					
+					if distance <= config.max_distance then
+						-- World to screen
+						local screen, visible = camera:WorldToScreenPoint(pos)
 						
-						-- Recalculate bounding box every 10 frames
-						if update_tick % 10 == 0 then
-							if not data.min_bound or not data.max_bound then
-								local parts = get_all_parts(obj)
-								data.parts = parts
-								data.min_bound, data.max_bound = calculate_bounding_box(parts)
-							end
-						end
-						
-						-- Calculate distance
-						local distance = calculate_distance(pos, camera_position)
-						
-						if distance <= config.max_distance then
-							-- World to screen
-							local screen, visible = camera:WorldToScreenPoint(pos)
+						if visible then
+							local fade_opacity = calculate_fade_opacity(distance)
 							
-							if visible then
-								local fade_opacity = calculate_fade_opacity(distance)
-								
-								if fade_opacity > 0 then
-									-- Calculate bounding box in screen space
-									local box_min, box_max = nil, nil
-									if config.box_esp and data.min_bound and data.max_bound then
-										local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
-										box_min, box_max = get_2d_bounding_box(corners, camera)
-									end
-									
-									-- Get health
-									local health, max_health = nil, nil
-									if config.health_bar then
-										health, max_health = get_object_health(obj)
-									end
-									
-									-- Store pre-computed render data
-									table_insert(new_render_data, {
-										name = data.name,
-										screen_pos = vector_create(screen.X, screen.Y, 0),
-										distance = distance,
-										fade_opacity = fade_opacity,
-										box_min = box_min,
-										box_max = box_max,
-										health = health,
-										max_health = max_health,
-									})
+							if fade_opacity > 0 then
+								-- Calculate bounding box in screen space
+								local box_min, box_max = nil, nil
+								if config.box_esp and data.min_bound and data.max_bound then
+									local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
+									box_min, box_max = get_2d_bounding_box(corners, camera)
 								end
+								
+								-- Get health
+								local health, max_health = nil, nil
+								if config.health_bar then
+									health, max_health = get_object_health(obj)
+								end
+								
+								-- Store pre-computed render data
+								table_insert(new_render_data, {
+									name = data.name,
+									screen_pos = vector_create(screen.X, screen.Y, 0),
+									distance = distance,
+									fade_opacity = fade_opacity,
+									box_min = box_min,
+									box_max = box_max,
+									health = health,
+									max_health = max_health,
+								})
 							end
 						end
 					end
@@ -475,11 +468,11 @@ local function update_loop()
 		end
 	end
 	
-	-- Swap render data (atomic operation)
+	-- Swap render data
 	render_data = new_render_data
 end
 
----- Render loop - ONLY DRAWING, no memory operations ----
+---- Render - ONLY DRAWING ----
 local function render_loop()
 	if not config.enabled or not viewport_size then
 		return
@@ -487,12 +480,11 @@ local function render_loop()
 	
 	local screen_center = vector_create(viewport_size.X / 2, viewport_size.Y / 2, 0)
 	
-	-- Iterate through pre-computed render data
 	for _, data in ipairs(render_data) do
 		local screen_pos = data.screen_pos
 		local fade_opacity = data.fade_opacity
 		
-		-- Bounding Box ESP
+		-- Bounding Box
 		if config.box_esp and data.box_min and data.box_max then
 			local box_size = data.box_max - data.box_min
 			DrawingImmediate.Rectangle(
@@ -533,7 +525,6 @@ local function render_loop()
 			
 			local bar_pos = screen_pos - vector_create(bar_width / 2, y_offset, 0)
 			
-			-- Background
 			DrawingImmediate.FilledRectangle(
 				bar_pos,
 				vector_create(bar_width, bar_height, 0),
@@ -541,7 +532,6 @@ local function render_loop()
 				0.8 * fade_opacity
 			)
 			
-			-- Health bar
 			DrawingImmediate.FilledRectangle(
 				bar_pos,
 				vector_create(bar_width * health_percent, bar_height, 0),
@@ -666,14 +656,13 @@ function ESP.start()
 	end
 	
 	config.enabled = true
-	update_tick = 0
-	scan_tick = 0
+	frame_count = 0
 	
-	-- Start render loop (ONLY for drawing)
-	render_connection = RunService.Render:Connect(render_loop)
-	
-	-- Start update loop in PostLocal (ALL memory/game operations)
+	-- PostLocal: ALL calculations every frame
 	update_connection = RunService.PostLocal:Connect(update_loop)
+	
+	-- Render: ONLY drawing every frame
+	render_connection = RunService.Render:Connect(render_loop)
 end
 
 function ESP.stop()
