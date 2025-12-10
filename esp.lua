@@ -26,8 +26,8 @@ local DEFAULT_CONFIG = {
 	tracers = false,
 	
 	-- Filtering
-	exclude_players = false, -- If true, excludes all player characters
-	auto_exclude_localplayer = true, -- Automatically exclude local player when path is workspace
+	exclude_players = false,
+	auto_exclude_localplayer = true,
 	
 	-- Colors
 	name_color = Color3.new(1, 1, 1),
@@ -55,15 +55,20 @@ local DEFAULT_CONFIG = {
 
 ---- variables ----
 local tracked_objects = {}
+local render_data = {}
 local active_paths = {}
 local include_filter = nil
 local exclude_filter = {}
 local camera = nil
+local camera_position = nil
+local viewport_size = nil
 local render_connection = nil
 local update_connection = nil
 local config = {}
 local local_player = nil
 local local_character = nil
+local update_tick = 0
+local scan_tick = 0
 
 ---- functions ----
 local function deep_copy(tbl: {[any]: any}): {[any]: any}
@@ -114,7 +119,6 @@ local function update_local_player()
 end
 
 local function is_player_character(obj: Instance): boolean
-	-- Check if object is a player character
 	if not obj or obj.ClassName ~= "Model" then
 		return false
 	end
@@ -132,12 +136,10 @@ local function is_player_character(obj: Instance): boolean
 end
 
 local function should_exclude_object(obj: Instance): boolean
-	-- Exclude local player character
 	if config.auto_exclude_localplayer and local_character and obj == local_character then
 		return true
 	end
 	
-	-- Exclude all players if configured
 	if config.exclude_players and is_player_character(obj) then
 		return true
 	end
@@ -148,14 +150,12 @@ end
 local function should_track_object(obj: Instance): boolean
 	assert(typeof(obj) == "Instance", "invalid argument #1 (Instance expected)")
 	
-	-- Check if should exclude
 	if should_exclude_object(obj) then
 		return false
 	end
 	
 	local obj_name = obj.Name
 	
-	-- Check include filter (whitelist mode)
 	if include_filter then
 		local found = false
 		for _, name in ipairs(include_filter) do
@@ -169,7 +169,6 @@ local function should_track_object(obj: Instance): boolean
 		end
 	end
 	
-	-- Check exclude filter (blacklist mode)
 	for _, name in ipairs(exclude_filter) do
 		if string_lower(obj_name):find(string_lower(name), 1, true) then
 			return false
@@ -210,7 +209,6 @@ local function calculate_bounding_box(parts: {Instance}): (vector?, vector?)
 			local pos = part.Position
 			local size = part.Size
 			
-			-- Calculate part bounds
 			local half_size_x = size.X / 2
 			local half_size_y = size.Y / 2
 			local half_size_z = size.Z / 2
@@ -234,24 +232,26 @@ end
 
 local function get_bounding_box_corners(min_bound: vector, max_bound: vector): {vector}
 	return {
-		vector_create(min_bound.X, min_bound.Y, min_bound.Z), -- 1: bottom-front-left
-		vector_create(max_bound.X, min_bound.Y, min_bound.Z), -- 2: bottom-front-right
-		vector_create(max_bound.X, min_bound.Y, max_bound.Z), -- 3: bottom-back-right
-		vector_create(min_bound.X, min_bound.Y, max_bound.Z), -- 4: bottom-back-left
-		vector_create(min_bound.X, max_bound.Y, min_bound.Z), -- 5: top-front-left
-		vector_create(max_bound.X, max_bound.Y, min_bound.Z), -- 6: top-front-right
-		vector_create(max_bound.X, max_bound.Y, max_bound.Z), -- 7: top-back-right
-		vector_create(min_bound.X, max_bound.Y, max_bound.Z), -- 8: top-back-left
+		vector_create(min_bound.X, min_bound.Y, min_bound.Z),
+		vector_create(max_bound.X, min_bound.Y, min_bound.Z),
+		vector_create(max_bound.X, min_bound.Y, max_bound.Z),
+		vector_create(min_bound.X, min_bound.Y, max_bound.Z),
+		vector_create(min_bound.X, max_bound.Y, min_bound.Z),
+		vector_create(max_bound.X, max_bound.Y, min_bound.Z),
+		vector_create(max_bound.X, max_bound.Y, max_bound.Z),
+		vector_create(min_bound.X, max_bound.Y, max_bound.Z),
 	}
 end
 
-local function get_2d_bounding_box(corners_3d: {vector}): (vector, vector)
+local function get_2d_bounding_box(corners_3d: {vector}, cam: Instance): (vector?, vector?)
 	local min_x, min_y = math_huge, math_huge
 	local max_x, max_y = -math_huge, -math_huge
+	local any_visible = false
 	
 	for _, corner in ipairs(corners_3d) do
-		local screen_pos, visible = camera:WorldToScreenPoint(corner)
+		local screen_pos, visible = cam:WorldToScreenPoint(corner)
 		if visible then
+			any_visible = true
 			min_x = math_min(min_x, screen_pos.X)
 			min_y = math_min(min_y, screen_pos.Y)
 			max_x = math_max(max_x, screen_pos.X)
@@ -259,7 +259,7 @@ local function get_2d_bounding_box(corners_3d: {vector}): (vector, vector)
 		end
 	end
 	
-	if min_x == math_huge then
+	if not any_visible or min_x == math_huge then
 		return nil, nil
 	end
 	
@@ -267,7 +267,6 @@ local function get_2d_bounding_box(corners_3d: {vector}): (vector, vector)
 end
 
 local function get_object_position(obj: Instance): vector?
-	-- Try different position methods
 	local success, result = pcall(function()
 		if obj.ClassName == "Model" then
 			local primary = obj.PrimaryPart
@@ -275,7 +274,6 @@ local function get_object_position(obj: Instance): vector?
 				return primary.Position
 			end
 			
-			-- Try common part names
 			local parts = {"HumanoidRootPart", "Head", "Torso", "UpperTorso"}
 			for _, part_name in ipairs(parts) do
 				local part = obj:FindFirstChild(part_name)
@@ -284,7 +282,6 @@ local function get_object_position(obj: Instance): vector?
 				end
 			end
 			
-			-- Fallback: first BasePart
 			for _, child in ipairs(obj:GetChildren()) do
 				if child.ClassName:find("Part") then
 					return child.Position
@@ -354,7 +351,6 @@ local function scan_path(path: Instance)
 					}
 				end
 			else
-				-- Update existing
 				tracked_objects[obj_id].last_seen = os.clock()
 			end
 		end
@@ -363,7 +359,7 @@ end
 
 local function cleanup_stale_objects()
 	local current_time = os.clock()
-	local stale_threshold = 2 -- seconds
+	local stale_threshold = 2
 	
 	for obj_id, data in pairs(tracked_objects) do
 		if current_time - data.last_seen > stale_threshold then
@@ -374,99 +370,138 @@ local function cleanup_stale_objects()
 	end
 end
 
+---- PostLocal update loop - ALL memory operations happen here ----
 local function update_loop()
-	while config.enabled do
-		-- Update camera and local player
-		local success = pcall(function()
-			camera = workspace.CurrentCamera
-		end)
-		
-		if not success then
-			camera = nil
+	if not config.enabled then
+		return
+	end
+	
+	update_tick = update_tick + 1
+	scan_tick = scan_tick + 1
+	
+	-- Update camera reference every frame
+	local success = pcall(function()
+		camera = workspace.CurrentCamera
+		if camera then
+			camera_position = camera.Position
+			viewport_size = camera.ViewportSize
 		end
+	end)
+	
+	if not success then
+		camera = nil
+		camera_position = nil
+		viewport_size = nil
+	end
+	
+	update_local_player()
+	
+	-- Scan paths every 30 frames (~0.5 seconds at 60fps)
+	if scan_tick >= 30 then
+		scan_tick = 0
 		
-		update_local_player()
-		
-		-- Scan all active paths
 		for _, path in ipairs(active_paths) do
 			if path and path.Parent then
 				scan_path(path)
 			end
 		end
 		
-		-- Cleanup stale objects
 		cleanup_stale_objects()
-		
-		task_wait(0.5) -- Update twice per second
 	end
+	
+	-- Pre-compute render data every frame
+	local new_render_data = {}
+	
+	if camera and camera_position then
+		for obj_id, data in pairs(tracked_objects) do
+			local obj = data.object
+			if obj and obj.Parent then
+				if not should_exclude_object(obj) then
+					-- Update position
+					local pos = get_object_position(obj)
+					if pos then
+						data.position = pos
+						
+						-- Recalculate bounding box every 10 frames
+						if update_tick % 10 == 0 then
+							if not data.min_bound or not data.max_bound then
+								local parts = get_all_parts(obj)
+								data.parts = parts
+								data.min_bound, data.max_bound = calculate_bounding_box(parts)
+							end
+						end
+						
+						-- Calculate distance
+						local distance = calculate_distance(pos, camera_position)
+						
+						if distance <= config.max_distance then
+							-- World to screen
+							local screen, visible = camera:WorldToScreenPoint(pos)
+							
+							if visible then
+								local fade_opacity = calculate_fade_opacity(distance)
+								
+								if fade_opacity > 0 then
+									-- Calculate bounding box in screen space
+									local box_min, box_max = nil, nil
+									if config.box_esp and data.min_bound and data.max_bound then
+										local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
+										box_min, box_max = get_2d_bounding_box(corners, camera)
+									end
+									
+									-- Get health
+									local health, max_health = nil, nil
+									if config.health_bar then
+										health, max_health = get_object_health(obj)
+									end
+									
+									-- Store pre-computed render data
+									table_insert(new_render_data, {
+										name = data.name,
+										screen_pos = vector_create(screen.X, screen.Y, 0),
+										distance = distance,
+										fade_opacity = fade_opacity,
+										box_min = box_min,
+										box_max = box_max,
+										health = health,
+										max_health = max_health,
+									})
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	
+	-- Swap render data (atomic operation)
+	render_data = new_render_data
 end
 
+---- Render loop - ONLY DRAWING, no memory operations ----
 local function render_loop()
-	if not camera or not config.enabled then
+	if not config.enabled or not viewport_size then
 		return
 	end
 	
-	local cam_pos = camera.Position
+	local screen_center = vector_create(viewport_size.X / 2, viewport_size.Y / 2, 0)
 	
-	for _, data in pairs(tracked_objects) do
-		local obj = data.object
-		if not obj or not obj.Parent then
-			continue
-		end
-		
-		-- Re-check exclusion (in case local player changed)
-		if should_exclude_object(obj) then
-			continue
-		end
-		
-		-- Update position and bounds
-		local pos = get_object_position(obj)
-		if not pos then
-			continue
-		end
-		data.position = pos
-		
-		-- Recalculate bounding box if needed
-		if not data.min_bound or not data.max_bound then
-			local parts = get_all_parts(obj)
-			data.parts = parts
-			data.min_bound, data.max_bound = calculate_bounding_box(parts)
-		end
-		
-		-- Calculate distance
-		local distance = calculate_distance(pos, cam_pos)
-		if distance > config.max_distance then
-			continue
-		end
-		
-		-- World to screen
-		local screen, visible = camera:WorldToScreenPoint(pos)
-		if not visible then
-			continue
-		end
-		
-		local screen_pos = vector_create(screen.X, screen.Y, 0)
-		local fade_opacity = calculate_fade_opacity(distance)
-		
-		if fade_opacity <= 0 then
-			continue
-		end
+	-- Iterate through pre-computed render data
+	for _, data in ipairs(render_data) do
+		local screen_pos = data.screen_pos
+		local fade_opacity = data.fade_opacity
 		
 		-- Bounding Box ESP
-		if config.box_esp and data.min_bound and data.max_bound then
-			local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
-			local min_2d, max_2d = get_2d_bounding_box(corners)
-			
-			if min_2d and max_2d then
-				local box_size = max_2d - min_2d
-				DrawingImmediate.Rectangle(
-					min_2d,
-					box_size,
-					config.box_color,
-					config.box_opacity * fade_opacity,
-					config.box_thickness
-				)
-			end
+		if config.box_esp and data.box_min and data.box_max then
+			local box_size = data.box_max - data.box_min
+			DrawingImmediate.Rectangle(
+				data.box_min,
+				box_size,
+				config.box_color,
+				config.box_opacity * fade_opacity,
+				config.box_thickness
+			)
 		end
 		
 		local y_offset = 0
@@ -475,7 +510,7 @@ local function render_loop()
 		if config.name_esp then
 			local name_text = data.name
 			if config.distance_esp then
-				name_text = `{name_text} [{math_floor(distance)}m]`
+				name_text = `{name_text} [{math_floor(data.distance)}m]`
 			end
 			
 			DrawingImmediate.OutlinedText(
@@ -491,42 +526,36 @@ local function render_loop()
 		end
 		
 		-- Health bar
-		if config.health_bar then
-			local health, max_health = get_object_health(obj)
-			if health and max_health and max_health > 0 then
-				local bar_width = 100
-				local bar_height = 4
-				local health_percent = health / max_health
-				
-				local bar_pos = screen_pos - vector_create(bar_width / 2, y_offset, 0)
-				
-				-- Background
-				DrawingImmediate.FilledRectangle(
-					bar_pos,
-					vector_create(bar_width, bar_height, 0),
-					Color3.new(0.2, 0.2, 0.2),
-					0.8 * fade_opacity
-				)
-				
-				-- Health bar
-				DrawingImmediate.FilledRectangle(
-					bar_pos,
-					vector_create(bar_width * health_percent, bar_height, 0),
-					config.health_bar_color,
-					0.9 * fade_opacity
-				)
-				
-				y_offset = y_offset + bar_height + 4
-			end
+		if config.health_bar and data.health and data.max_health and data.max_health > 0 then
+			local bar_width = 100
+			local bar_height = 4
+			local health_percent = data.health / data.max_health
+			
+			local bar_pos = screen_pos - vector_create(bar_width / 2, y_offset, 0)
+			
+			-- Background
+			DrawingImmediate.FilledRectangle(
+				bar_pos,
+				vector_create(bar_width, bar_height, 0),
+				Color3.new(0.2, 0.2, 0.2),
+				0.8 * fade_opacity
+			)
+			
+			-- Health bar
+			DrawingImmediate.FilledRectangle(
+				bar_pos,
+				vector_create(bar_width * health_percent, bar_height, 0),
+				config.health_bar_color,
+				0.9 * fade_opacity
+			)
+			
+			y_offset = y_offset + bar_height + 4
 		end
 		
 		-- Tracers
 		if config.tracers then
-			local screen_center = camera.ViewportSize / 2
-			local tracer_start = vector_create(screen_center.X, screen_center.Y, 0)
-			
 			DrawingImmediate.Line(
-				tracer_start,
+				screen_center,
 				screen_pos,
 				config.tracer_color,
 				config.tracer_opacity * fade_opacity,
@@ -545,14 +574,12 @@ function ESP.new(settings: {[string]: any}?): typeof(ESP)
 	
 	config = deep_copy(DEFAULT_CONFIG)
 	
-	-- Apply custom settings
 	for key, value in pairs(settings) do
 		if config[key] ~= nil then
 			config[key] = value
 		end
 	end
 	
-	-- Initialize local player
 	update_local_player()
 	
 	return ESP
@@ -562,7 +589,6 @@ function ESP.add_path(path: Instance | string)
 	local actual_path: Instance? = nil
 	
 	if typeof(path) == "string" then
-		-- Try to find the path
 		local parts = string.split(path, ".")
 		local current = workspace
 		
@@ -587,7 +613,6 @@ function ESP.add_path(path: Instance | string)
 	
 	assert(actual_path, `path not found: {path}`)
 	
-	-- Check if already added
 	for _, existing in ipairs(active_paths) do
 		if existing == actual_path then
 			return true
@@ -641,12 +666,14 @@ function ESP.start()
 	end
 	
 	config.enabled = true
+	update_tick = 0
+	scan_tick = 0
 	
-	-- Start render loop
+	-- Start render loop (ONLY for drawing)
 	render_connection = RunService.Render:Connect(render_loop)
 	
-	-- Start update loop
-	task_spawn(update_loop)
+	-- Start update loop in PostLocal (ALL memory/game operations)
+	update_connection = RunService.PostLocal:Connect(update_loop)
 end
 
 function ESP.stop()
@@ -657,8 +684,13 @@ function ESP.stop()
 		render_connection = nil
 	end
 	
-	-- Clear tracked objects
+	if update_connection then
+		update_connection:Disconnect()
+		update_connection = nil
+	end
+	
 	tracked_objects = {}
+	render_data = {}
 end
 
 function ESP.get_tracked_count(): number
