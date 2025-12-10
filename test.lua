@@ -55,7 +55,7 @@ local DEFAULT_CONFIG = {
 
 ---- variables ----
 local tracked_objects = {}
-local render_data = {} -- Pre-computed data for rendering
+local render_data = {}
 local active_paths = {}
 local include_filter = nil
 local exclude_filter = {}
@@ -67,6 +67,8 @@ local update_connection = nil
 local config = {}
 local local_player = nil
 local local_character = nil
+local update_tick = 0
+local scan_tick = 0
 
 ---- functions ----
 local function deep_copy(tbl: {[any]: any}): {[any]: any}
@@ -368,92 +370,102 @@ local function cleanup_stale_objects()
 	end
 end
 
----- update loop - ALL memory operations happen here ----
+---- PostLocal update loop - ALL memory operations happen here ----
 local function update_loop()
-	while config.enabled do
-		-- Update camera reference
-		local success = pcall(function()
-			camera = workspace.CurrentCamera
-			if camera then
-				camera_position = camera.Position
-				viewport_size = camera.ViewportSize
-			end
-		end)
-		
-		if not success then
-			camera = nil
-			camera_position = nil
-			viewport_size = nil
+	if not config.enabled then
+		return
+	end
+	
+	update_tick = update_tick + 1
+	scan_tick = scan_tick + 1
+	
+	-- Update camera reference every frame
+	local success = pcall(function()
+		camera = workspace.CurrentCamera
+		if camera then
+			camera_position = camera.Position
+			viewport_size = camera.ViewportSize
 		end
+	end)
+	
+	if not success then
+		camera = nil
+		camera_position = nil
+		viewport_size = nil
+	end
+	
+	update_local_player()
+	
+	-- Scan paths every 30 frames (~0.5 seconds at 60fps)
+	if scan_tick >= 30 then
+		scan_tick = 0
 		
-		update_local_player()
-		
-		-- Scan all active paths
 		for _, path in ipairs(active_paths) do
 			if path and path.Parent then
 				scan_path(path)
 			end
 		end
 		
-		-- Cleanup stale objects
 		cleanup_stale_objects()
-		
-		-- Pre-compute render data
-		local new_render_data = {}
-		
-		if camera and camera_position then
-			for obj_id, data in pairs(tracked_objects) do
-				local obj = data.object
-				if obj and obj.Parent then
-					if not should_exclude_object(obj) then
-						-- Update position
-						local pos = get_object_position(obj)
-						if pos then
-							data.position = pos
-							
-							-- Recalculate bounding box if needed
+	end
+	
+	-- Pre-compute render data every frame
+	local new_render_data = {}
+	
+	if camera and camera_position then
+		for obj_id, data in pairs(tracked_objects) do
+			local obj = data.object
+			if obj and obj.Parent then
+				if not should_exclude_object(obj) then
+					-- Update position
+					local pos = get_object_position(obj)
+					if pos then
+						data.position = pos
+						
+						-- Recalculate bounding box every 10 frames
+						if update_tick % 10 == 0 then
 							if not data.min_bound or not data.max_bound then
 								local parts = get_all_parts(obj)
 								data.parts = parts
 								data.min_bound, data.max_bound = calculate_bounding_box(parts)
 							end
+						end
+						
+						-- Calculate distance
+						local distance = calculate_distance(pos, camera_position)
+						
+						if distance <= config.max_distance then
+							-- World to screen
+							local screen, visible = camera:WorldToScreenPoint(pos)
 							
-							-- Calculate distance
-							local distance = calculate_distance(pos, camera_position)
-							
-							if distance <= config.max_distance then
-								-- World to screen
-								local screen, visible = camera:WorldToScreenPoint(pos)
+							if visible then
+								local fade_opacity = calculate_fade_opacity(distance)
 								
-								if visible then
-									local fade_opacity = calculate_fade_opacity(distance)
-									
-									if fade_opacity > 0 then
-										-- Calculate bounding box in screen space
-										local box_min, box_max = nil, nil
-										if config.box_esp and data.min_bound and data.max_bound then
-											local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
-											box_min, box_max = get_2d_bounding_box(corners, camera)
-										end
-										
-										-- Get health
-										local health, max_health = nil, nil
-										if config.health_bar then
-											health, max_health = get_object_health(obj)
-										end
-										
-										-- Store pre-computed render data
-										table_insert(new_render_data, {
-											name = data.name,
-											screen_pos = vector_create(screen.X, screen.Y, 0),
-											distance = distance,
-											fade_opacity = fade_opacity,
-											box_min = box_min,
-											box_max = box_max,
-											health = health,
-											max_health = max_health,
-										})
+								if fade_opacity > 0 then
+									-- Calculate bounding box in screen space
+									local box_min, box_max = nil, nil
+									if config.box_esp and data.min_bound and data.max_bound then
+										local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
+										box_min, box_max = get_2d_bounding_box(corners, camera)
 									end
+									
+									-- Get health
+									local health, max_health = nil, nil
+									if config.health_bar then
+										health, max_health = get_object_health(obj)
+									end
+									
+									-- Store pre-computed render data
+									table_insert(new_render_data, {
+										name = data.name,
+										screen_pos = vector_create(screen.X, screen.Y, 0),
+										distance = distance,
+										fade_opacity = fade_opacity,
+										box_min = box_min,
+										box_max = box_max,
+										health = health,
+										max_health = max_health,
+									})
 								end
 							end
 						end
@@ -461,15 +473,13 @@ local function update_loop()
 				end
 			end
 		end
-		
-		-- Swap render data (atomic operation)
-		render_data = new_render_data
-		
-		task_wait(0.04) -- Update 10 times per second
 	end
+	
+	-- Swap render data (atomic operation)
+	render_data = new_render_data
 end
 
----- render loop - ONLY DRAWING, no memory operations ----
+---- Render loop - ONLY DRAWING, no memory operations ----
 local function render_loop()
 	if not config.enabled or not viewport_size then
 		return
@@ -656,12 +666,14 @@ function ESP.start()
 	end
 	
 	config.enabled = true
+	update_tick = 0
+	scan_tick = 0
 	
 	-- Start render loop (ONLY for drawing)
 	render_connection = RunService.Render:Connect(render_loop)
 	
-	-- Start update loop (ALL memory operations)
-	task_spawn(update_loop)
+	-- Start update loop in PostLocal (ALL memory/game operations)
+	update_connection = RunService.PostLocal:Connect(update_loop)
 end
 
 function ESP.stop()
@@ -670,6 +682,11 @@ function ESP.stop()
 	if render_connection then
 		render_connection:Disconnect()
 		render_connection = nil
+	end
+	
+	if update_connection then
+		update_connection:Disconnect()
+		update_connection = nil
 	end
 	
 	tracked_objects = {}
