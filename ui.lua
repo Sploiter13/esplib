@@ -307,23 +307,6 @@ local function get_object_position(obj: Instance): vector?
 	return nil
 end
 
-
-function ESP.set_path_rules(path: Instance, include_set: { [string]: boolean }?, exclude_set: { [string]: boolean }?)
-    assert(typeof(path) == "Instance", "invalid argument #1 (Instance expected)")
-    local pid = get_id(path)
-
-    if (include_set == nil) and (exclude_set == nil) then
-        path_rules[pid] = nil
-        return true
-    end
-
-    path_rules[pid] = path_rules[pid] or {}
-    path_rules[pid].include = include_set
-    path_rules[pid].exclude = exclude_set
-    return true
-end
-
-
 local function get_object_health(obj: Instance): (number?, number?)
 	if obj.ClassName ~= "Model" then
 		return nil, nil
@@ -729,6 +712,21 @@ function ESP.get_tracked_count(): number
 		count = count + 1
 	end
 	return count
+end
+
+function ESP.set_path_rules(path: Instance, include_set: { [string]: boolean }?, exclude_set: { [string]: boolean }?)
+    assert(typeof(path) == "Instance", "invalid argument #1 (Instance expected)")
+    local pid = get_id(path)
+
+    if (include_set == nil) and (exclude_set == nil) then
+        path_rules[pid] = nil
+        return true
+    end
+
+    path_rules[pid] = path_rules[pid] or {}
+    path_rules[pid].include = include_set
+    path_rules[pid].exclude = exclude_set
+    return true
 end
 
 ---- exports ----
