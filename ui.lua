@@ -362,12 +362,12 @@ local obj_id = get_id(obj)
 if rules then
     local ex = rules.exclude
     if ex and ex[obj_id] then
-        ::continue::
+        continue
     end
 
     local inc = rules.include
     if inc and next(inc) ~= nil and not inc[obj_id] then
-        ::continue::
+        continue
     end
 end
 
