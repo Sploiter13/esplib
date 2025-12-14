@@ -1,5 +1,5 @@
 --!native
---!optimize 2
+--!optimization 2
 
 ---- environment ----
 local assert, typeof, tonumber = assert, typeof, tonumber
