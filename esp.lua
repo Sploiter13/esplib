@@ -84,7 +84,7 @@ end
 
 local function calculate_distance(pos1: vector, pos2: vector): number
 	local delta = pos1 - pos2
-	return math_sqrt(delta.X * delta.X + delta.Y * delta.Y + delta.Z * delta.Z)
+    return vector_magnitude(pos1 - pos2)
 end
 
 local function calculate_fade_opacity(distance: number): number
@@ -370,102 +370,106 @@ local function cleanup_stale_objects()
 end
 
 ---- PostLocal - Scanning and ALL calculations happen here EVERY FRAME ----
+---- PostLocal - Scanning and calculations ----
 local function update_loop()
-	if not config.enabled then
-		return
-	end
-	
-	frame_count = frame_count + 1
-	
-	-- Update camera reference every frame
-	local success = pcall(function()
-		camera = workspace.CurrentCamera
-		if camera then
-			camera_position = camera.Position
-			viewport_size = camera.ViewportSize
-		end
-	end)
-	
-	if not success then
-		camera = nil
-		camera_position = nil
-		viewport_size = nil
-		return
-	end
-	
-	update_local_player()
-	
-	-- Scan paths every 30 frames (~0.5 seconds at 60fps)
-	if frame_count % 30 == 0 then
-		for _, path in ipairs(active_paths) do
-			if path and path.Parent then
-				scan_path(path)
-			end
-		end
-		
-		cleanup_stale_objects()
-	end
-	
-	-- Calculate render data EVERY FRAME for smooth movement
-	local new_render_data = {}
-	
-	for obj_id, data in pairs(tracked_objects) do
-		local obj = data.object
-		if obj and obj.Parent then
-			if not should_exclude_object(obj) then
-				-- Update position every frame
-				local pos = get_object_position(obj)
-				if pos then
-					data.position = pos
-					
-						local parts = get_all_parts(obj)
-						data.parts = parts
-						data.min_bound, data.max_bound = calculate_bounding_box(parts)					
-					-- Calculate distance
-					local distance = calculate_distance(pos, camera_position)
-					
-					if distance <= config.max_distance then
-						-- World to screen
-						local screen, visible = camera:WorldToScreenPoint(pos)
-						
-						if visible then
-							local fade_opacity = calculate_fade_opacity(distance)
-							
-							if fade_opacity > 0 then
-								-- Calculate bounding box in screen space
-								local box_min, box_max = nil, nil
-								if config.box_esp and data.min_bound and data.max_bound then
-									local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
-									box_min, box_max = get_2d_bounding_box(corners, camera)
-								end
-								
-								-- Get health
-								local health, max_health = nil, nil
-								if config.health_bar then
-									health, max_health = get_object_health(obj)
-								end
-								
-								-- Store pre-computed render data
-								table_insert(new_render_data, {
-									name = data.name,
-									screen_pos = vector_create(screen.X, screen.Y, 0),
-									distance = distance,
-									fade_opacity = fade_opacity,
-									box_min = box_min,
-									box_max = box_max,
-									health = health,
-									max_health = max_health,
-								})
-							end
-						end
-					end
-				end
-			end
-		end
-	end
-	
-	-- Swap render data
-	render_data = new_render_data
+    if not config.enabled then
+        return
+    end
+    
+    frame_count += 1
+    
+    -- Update camera reference every frame
+    local success = pcall(function()
+        camera = workspace.CurrentCamera
+        if camera then
+            camera_position = camera.CFrame.Position  -- ✅ Fixed
+            viewport_size = camera.ViewportSize
+        end
+    end)
+    
+    if not success or not camera or not camera_position then
+        camera = nil
+        camera_position = nil
+        viewport_size = nil
+        return
+    end
+    
+    update_local_player()
+    
+    -- Scan paths every 30 frames (~0.5 seconds at 60fps)
+    if frame_count % 30 == 0 then
+        for _, path in ipairs(active_paths) do
+            if path and path.Parent then
+                scan_path(path)
+            end
+        end
+        cleanup_stale_objects()
+    end
+    
+    -- Calculate render data EVERY FRAME for smooth movement
+    local new_render_data = {}
+    
+    for obj_id, data in pairs(tracked_objects) do
+        local obj = data.object
+        if obj and obj.Parent then
+            if not should_exclude_object(obj) then
+                -- Update position every frame
+                local pos = get_object_position(obj)
+                if pos then
+                    data.position = pos
+                    
+                    -- ✅ Only recalculate bounding box every 3 frames
+                    if frame_count % 3 == 0 then
+                        local parts = get_all_parts(obj)
+                        data.parts = parts
+                        data.min_bound, data.max_bound = calculate_bounding_box(parts)
+                    end
+                    
+                    -- Calculate distance (using cached vector_magnitude)
+                    local distance = calculate_distance(pos, camera_position)
+                    
+                    if distance <= config.max_distance then
+                        -- World to screen
+                        local screen, visible = camera:WorldToScreenPoint(pos)
+                        
+                        if visible then
+                            local fade_opacity = calculate_fade_opacity(distance)
+                            
+                            if fade_opacity > 0 then
+                                -- Calculate bounding box in screen space
+                                local box_min, box_max = nil, nil
+                                if config.box_esp and data.min_bound and data.max_bound then
+                                    local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
+                                    box_min, box_max = get_2d_bounding_box(corners, camera)
+                                end
+                                
+                                -- Get health
+                                local health, max_health = nil, nil
+                                if config.health_bar then
+                                    health, max_health = get_object_health(obj)
+                                end
+                                
+                                -- Store pre-computed render data
+                                table_insert(new_render_data, {
+                                    name = data.name,
+                                    screen_pos = vector_create(screen.X, screen.Y, 0),
+                                    distance = distance,
+                                    fade_opacity = fade_opacity,
+                                    box_min = box_min,
+                                    box_max = box_max,
+                                    health = health,
+                                    max_health = max_health,
+                                })
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Swap render data
+    render_data = new_render_data
 end
 
 ---- Render - ONLY DRAWING ----
