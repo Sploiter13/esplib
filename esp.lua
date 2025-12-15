@@ -419,7 +419,7 @@ local function update_loop()
 					data.position = pos
 					
 					-- Recalculate bounding box every 60 frames
-					if frame_count % 60 == 0 then
+					if frame_count % 160 == 0 then
 						local parts = get_all_parts(obj)
 						data.parts = parts
 						data.min_bound, data.max_bound = calculate_bounding_box(parts)
