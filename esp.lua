@@ -418,13 +418,9 @@ local function update_loop()
 				if pos then
 					data.position = pos
 					
-					-- Recalculate bounding box every 60 frames
-					if frame_count % 160 == 0 then
 						local parts = get_all_parts(obj)
 						data.parts = parts
-						data.min_bound, data.max_bound = calculate_bounding_box(parts)
-					end
-					
+						data.min_bound, data.max_bound = calculate_bounding_box(parts)					
 					-- Calculate distance
 					local distance = calculate_distance(pos, camera_position)
 					
