@@ -272,57 +272,63 @@ local function should_track_object(obj: Instance): boolean
 	return true
 end
 
-local function get_all_parts(obj: Instance): { Instance }
-	local parts = {}
-
-	pcall(function()
-		if is_part_class(obj.ClassName) then
-			table_insert(parts, obj)
-		elseif obj.ClassName == "Model" then
-			for _, child in ipairs(obj:GetDescendants()) do
-				if is_part_class(child.ClassName) then
-					table_insert(parts, child)
-				end
-			end
-		end
-	end)
-
-	return parts
+local function get_all_parts(obj: Instance?): { Instance }
+    local parts = {}
+    
+    if not obj or (obj ~= workspace and not obj.Parent) then
+        return parts
+    end
+    
+    pcall(function()
+        if is_part_class(obj.ClassName) then
+            table_insert(parts, obj)
+        elseif obj.ClassName == "Model" then
+            for _, child in ipairs(obj:GetDescendants()) do
+                if child and child.Parent and is_part_class(child.ClassName) then
+                    table_insert(parts, child)
+                end
+            end
+        end
+    end)
+    
+    return parts
 end
+
 
 local function calculate_bounding_box(parts: { Instance }): (vector?, vector?)
-	if #parts == 0 then
-		return nil, nil
-	end
-
-	local min_x, min_y, min_z = math.huge, math.huge, math.huge
-	local max_x, max_y, max_z = -math.huge, -math.huge, -math.huge
-
-	for _, part in ipairs(parts) do
-		pcall(function()
-			local pos = part.Position
-			local size = part.Size
-
-			local hx = size.X / 2
-			local hy = size.Y / 2
-			local hz = size.Z / 2
-
-			min_x = math_min(min_x, pos.X - hx)
-			min_y = math_min(min_y, pos.Y - hy)
-			min_z = math_min(min_z, pos.Z - hz)
-
-			max_x = math_max(max_x, pos.X + hx)
-			max_y = math_max(max_y, pos.Y + hy)
-			max_z = math_max(max_z, pos.Z + hz)
-		end)
-	end
-
-	if min_x == math.huge then
-		return nil, nil
-	end
-
-	return vector_create(min_x, min_y, min_z), vector_create(max_x, max_y, max_z)
+    if #parts == 0 then
+        return nil, nil
+    end
+    
+    local min_x, min_y, min_z = math.huge, math.huge, math.huge
+    local max_x, max_y, max_z = -math.huge, -math.huge, -math.huge
+    
+    for _, part in ipairs(parts) do
+        if part and part.Parent then
+            pcall(function()
+                local pos = part.Position
+                local size = part.Size
+                local hx = size.X / 2
+                local hy = size.Y / 2
+                local hz = size.Z / 2
+                
+                min_x = math_min(min_x, pos.X - hx)
+                min_y = math_min(min_y, pos.Y - hy)
+                min_z = math_min(min_z, pos.Z - hz)
+                max_x = math_max(max_x, pos.X + hx)
+                max_y = math_max(max_y, pos.Y + hy)
+                max_z = math_max(max_z, pos.Z + hz)
+            end)
+        end
+    end
+    
+    if min_x == math.huge then
+        return nil, nil
+    end
+    
+    return vector_create(min_x, min_y, min_z), vector_create(max_x, max_y, max_z)
 end
+
 
 local function get_bounding_box_corners(min_bound: vector, max_bound: vector): { vector }
 	return {
@@ -360,61 +366,70 @@ local function get_2d_bounding_box(corners_3d: { vector }, cam: any): (vector?, 
 	return vector_create(min_x, min_y, 0), vector_create(max_x, max_y, 0)
 end
 
-local function get_object_position(obj: Instance): vector?
-	local ok, result = pcall(function()
-		if obj.ClassName == "Model" then
-			local primary = obj.PrimaryPart
-			if primary then
-				return primary.Position
-			end
-
-			local prefer = { "HumanoidRootPart", "Head", "Torso", "UpperTorso" }
-			for _, part_name in ipairs(prefer) do
-				local part = obj:FindFirstChild(part_name)
-				if part and is_part_class(part.ClassName) then
-					return part.Position
-				end
-			end
-
-			for _, child in ipairs(obj:GetChildren()) do
-				if is_part_class(child.ClassName) then
-					return child.Position
-				end
-			end
-			return nil
-		end
-
-		if is_part_class(obj.ClassName) then
-			return obj.Position
-		end
-
-		return nil
-	end)
-
-	if ok and result then
-		return result
-	end
-	return nil
+local function get_object_position(obj: Instance?): vector?
+    if not obj or (obj ~= workspace and not obj.Parent) then
+        return nil
+    end
+    
+    local ok, result = pcall(function()
+        if obj.ClassName == "Model" then
+            local primary = obj.PrimaryPart
+            if primary and primary.Parent then  
+                return primary.Position
+            end
+            
+            local prefer = { "HumanoidRootPart", "Head", "Torso", "UpperTorso" }
+            for _, part_name in ipairs(prefer) do
+                local part = obj:FindFirstChild(part_name)
+                if part and part.Parent and is_part_class(part.ClassName) then
+                    return part.Position
+                end
+            end
+            
+            for _, child in ipairs(obj:GetChildren()) do
+                if child and child.Parent and is_part_class(child.ClassName) then
+                    return child.Position
+                end
+            end
+        elseif is_part_class(obj.ClassName) then
+            return obj.Position
+        end
+        
+        return nil
+    end)
+    
+    if ok and result then
+        return result
+    end
+    
+    return nil
 end
 
-local function get_object_health(obj: Instance): (number?, number?)
-	if obj.ClassName ~= "Model" then
-		return nil, nil
-	end
 
-	local ok, health, max_health = pcall(function()
-		local humanoid = obj:FindFirstChildOfClass("Humanoid")
-		if humanoid then
-			return humanoid.Health, humanoid.MaxHealth
-		end
-		return nil, nil
-	end)
-
-	if ok then
-		return health, max_health
-	end
-	return nil, nil
+local function get_object_health(obj: Instance?): (number?, number?)
+    if not obj or (obj ~= workspace and not obj.Parent) then
+        return nil, nil
+    end
+    
+    if obj.ClassName ~= "Model" then
+        return nil, nil
+    end
+    
+    local ok, health, max_health = pcall(function()
+        local humanoid = obj:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.Parent then
+            return humanoid.Health, humanoid.MaxHealth
+        end
+        return nil, nil
+    end)
+    
+    if ok then
+        return health, max_health
+    end
+    
+    return nil, nil
 end
+
 
 local function add_tracked(obj: Instance)
 	if (not obj) or (obj ~= workspace and not obj.Parent) then
@@ -596,7 +611,6 @@ for _, data in pairs(tracked_objects) do
         if pos then
             data.position = pos
             
-            -- ✅ Only recalculate bounding box every 3 frames
             if frame_count % 3 == 0 then
                 local parts = get_all_parts(obj)
                 data.parts = parts
