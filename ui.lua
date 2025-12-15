@@ -579,58 +579,68 @@ local function esp_update_loop()
 
 	local new_render_data = {}
 
-	for _, data in pairs(tracked_objects) do
-		local obj = data.object
-		if obj and (obj == workspace or obj.Parent) and not should_exclude_object(obj) then
-			local pos_ref = data.pos_ref
-			if (not pos_ref) or (not pos_ref.Parent) then
-				pos_ref = resolve_position_ref(obj)
-				data.pos_ref = pos_ref
-			end
-			if not pos_ref then
-				continue
-			end
-			local pos = pos_ref.Position
-			if pos then
-				data.position = pos				
-					local parts = get_all_parts(obj)
-					data.parts = parts
-					data.min_bound, data.max_bound = calculate_bounding_box(parts)
-				local distance = calculate_distance(pos, camera_position)
-				if distance <= config.max_distance then
-					local screen, visible = camera:WorldToScreenPoint(pos)
-					if visible then
-						local fade_opacity = calculate_fade_opacity(distance)
-						if fade_opacity > 0 then
-							local box_min, box_max = nil, nil
-							if config.box_esp and data.min_bound and data.max_bound then
-								local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
-								box_min, box_max = get_2d_bounding_box(corners, camera)
-							end
+for _, data in pairs(tracked_objects) do
+    local obj = data.object
+    if obj and (obj == workspace or obj.Parent) and not should_exclude_object(obj) then
+        local pos_ref = data.pos_ref
+        if (not pos_ref) or (not pos_ref.Parent) then
+            pos_ref = resolve_position_ref(obj)
+            data.pos_ref = pos_ref
+        end
+        
+        if not pos_ref then
+            continue
+        end
+        
+        local pos = pos_ref.Position
+        if pos then
+            data.position = pos
+            
+            -- ✅ Only recalculate bounding box every 3 frames
+            if frame_count % 3 == 0 then
+                local parts = get_all_parts(obj)
+                data.parts = parts
+                data.min_bound, data.max_bound = calculate_bounding_box(parts)
+            end
+            
+            local distance = calculate_distance(pos, camera_position)
+            
+            if distance <= config.max_distance then
+                local screen, visible = camera:WorldToScreenPoint(pos)
+                
+                if visible then
+                    local fade_opacity = calculate_fade_opacity(distance)
+                    
+                    if fade_opacity > 0 then
+                        local box_min, box_max = nil, nil
+                        if config.box_esp and data.min_bound and data.max_bound then
+                            local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
+                            box_min, box_max = get_2d_bounding_box(corners, camera)
+                        end
+                        
+                        local health, max_health = nil, nil
+                        if config.health_bar then
+                            health, max_health = get_object_health(obj)
+                        end
+                        
+                        table_insert(new_render_data, {
+                            name = data.name,
+                            screen_pos = vector_create(screen.X, screen.Y, 0),
+                            distance = distance,
+                            fade_opacity = fade_opacity,
+                            box_min = box_min,
+                            box_max = box_max,
+                            health = health,
+                            max_health = max_health,
+                        })
+                    end
+                end
+            end
+        end
+    end
+end
 
-							local health, max_health = nil, nil
-							if config.health_bar then
-								health, max_health = get_object_health(obj)
-							end
-
-							table_insert(new_render_data, {
-								name = data.name,
-								screen_pos = vector_create(screen.X, screen.Y, 0),
-								distance = distance,
-								fade_opacity = fade_opacity,
-								box_min = box_min,
-								box_max = box_max,
-								health = health,
-								max_health = max_health,
-							})
-						end
-					end
-				end
-			end
-		end
-	end
-
-	render_data = new_render_data
+render_data = new_render_data
 end
 
 local function esp_render_loop()
