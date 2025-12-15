@@ -592,15 +592,10 @@ local function esp_update_loop()
 			end
 			local pos = pos_ref.Position
 			if pos then
-				data.position = pos
-
-				-- bbox recalculation less often
-				if frame_count % 90 == 0 then
+				data.position = pos				
 					local parts = get_all_parts(obj)
 					data.parts = parts
 					data.min_bound, data.max_bound = calculate_bounding_box(parts)
-				end
-
 				local distance = calculate_distance(pos, camera_position)
 				if distance <= config.max_distance then
 					local screen, visible = camera:WorldToScreenPoint(pos)
