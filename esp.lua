@@ -83,7 +83,6 @@ local function deep_copy(tbl: {[any]: any}): {[any]: any}
 end
 
 local function calculate_distance(pos1: vector, pos2: vector): number
-	local delta = pos1 - pos2
     return vector_magnitude(pos1 - pos2)
 end
 
@@ -177,56 +176,76 @@ local function should_track_object(obj: Instance): boolean
 	return true
 end
 
-local function get_all_parts(obj: Instance): {Instance}
-	local parts = {}
-	
-	local success = pcall(function()
-		if obj.ClassName:find("Part") then
-			table_insert(parts, obj)
-		elseif obj.ClassName == "Model" then
-			for _, child in ipairs(obj:GetDescendants()) do
-				if child.ClassName:find("Part") then
-					table_insert(parts, child)
-				end
-			end
-		end
-	end)
-	
-	return parts
+local function get_all_parts(obj: Instance?): {Instance}
+    local parts = {}
+    
+    if not obj then
+        return parts
+    end
+    
+    if obj ~= workspace then
+        local ok = pcall(function()
+            return obj.Parent
+        end)
+        if not ok or not obj.Parent then
+            return parts
+        end
+    end
+    
+    local success = pcall(function()
+        if obj.ClassName:find("Part") then
+            table_insert(parts, obj)
+        elseif obj.ClassName == "Model" then
+            for _, child in ipairs(obj:GetDescendants()) do
+                if child and child.Parent and child.ClassName:find("Part") then
+                    table_insert(parts, child)
+                end
+            end
+        end
+    end)
+    
+    return parts
 end
 
+
 local function calculate_bounding_box(parts: {Instance}): (vector?, vector?)
-	if #parts == 0 then
-		return nil, nil
-	end
-	
-	local min_x, min_y, min_z = math_huge, math_huge, math_huge
-	local max_x, max_y, max_z = -math_huge, -math_huge, -math_huge
-	
-	for _, part in ipairs(parts) do
-		local success = pcall(function()
-			local pos = part.Position
-			local size = part.Size
-			
-			local half_size_x = size.X / 2
-			local half_size_y = size.Y / 2
-			local half_size_z = size.Z / 2
-			
-			min_x = math_min(min_x, pos.X - half_size_x)
-			min_y = math_min(min_y, pos.Y - half_size_y)
-			min_z = math_min(min_z, pos.Z - half_size_z)
-			
-			max_x = math_max(max_x, pos.X + half_size_x)
-			max_y = math_max(max_y, pos.Y + half_size_y)
-			max_z = math_max(max_z, pos.Z + half_size_z)
-		end)
-	end
-	
-	if min_x == math_huge then
-		return nil, nil
-	end
-	
-	return vector_create(min_x, min_y, min_z), vector_create(max_x, max_y, max_z)
+    if #parts == 0 then
+        return nil, nil
+    end
+    
+    local min_x, min_y, min_z = math_huge, math_huge, math_huge
+    local max_x, max_y, max_z = -math_huge, -math_huge, -math_huge
+    
+    for _, part in ipairs(parts) do
+        if part then
+            local ok = pcall(function()
+                return part.Parent
+            end)
+            
+            if ok and part.Parent then
+                local success = pcall(function()
+                    local pos = part.Position
+                    local size = part.Size
+                    local half_size_x = size.X / 2
+                    local half_size_y = size.Y / 2
+                    local half_size_z = size.Z / 2
+                    
+                    min_x = math_min(min_x, pos.X - half_size_x)
+                    min_y = math_min(min_y, pos.Y - half_size_y)
+                    min_z = math_min(min_z, pos.Z - half_size_z)
+                    max_x = math_max(max_x, pos.X + half_size_x)
+                    max_y = math_max(max_y, pos.Y + half_size_y)
+                    max_z = math_max(max_z, pos.Z + half_size_z)
+                end)
+            end
+        end
+    end
+    
+    if min_x == math_huge then
+        return nil, nil
+    end
+    
+    return vector_create(min_x, min_y, min_z), vector_create(max_x, max_y, max_z)
 end
 
 local function get_bounding_box_corners(min_bound: vector, max_bound: vector): {vector}
@@ -265,57 +284,88 @@ local function get_2d_bounding_box(corners_3d: {vector}, cam: Instance): (vector
 	return vector_create(min_x, min_y, 0), vector_create(max_x, max_y, 0)
 end
 
-local function get_object_position(obj: Instance): vector?
-	local success, result = pcall(function()
-		if obj.ClassName == "Model" then
-			local primary = obj.PrimaryPart
-			if primary then
-				return primary.Position
-			end
-			
-			local parts = {"HumanoidRootPart", "Head", "Torso", "UpperTorso"}
-			for _, part_name in ipairs(parts) do
-				local part = obj:FindFirstChild(part_name)
-				if part and part.ClassName:find("Part") then
-					return part.Position
-				end
-			end
-			
-			for _, child in ipairs(obj:GetChildren()) do
-				if child.ClassName:find("Part") then
-					return child.Position
-				end
-			end
-		elseif obj.ClassName:find("Part") then
-			return obj.Position
-		end
-		return nil
-	end)
-	
-	if success and result then
-		return result
-	end
-	return nil
+local function get_object_position(obj: Instance?): vector?
+    if not obj then
+        return nil
+    end
+    
+    if obj ~= workspace then
+        local ok = pcall(function()
+            return obj.Parent
+        end)
+        if not ok or not obj.Parent then
+            return nil
+        end
+    end
+    
+    local success, result = pcall(function()
+        if obj.ClassName == "Model" then
+            local primary = obj.PrimaryPart
+            if primary and primary.Parent then
+                return primary.Position
+            end
+            
+            local parts = {"HumanoidRootPart", "Head", "Torso", "UpperTorso"}
+            for _, part_name in ipairs(parts) do
+                local part = obj:FindFirstChild(part_name)
+                if part and part.Parent and part.ClassName:find("Part") then
+                    return part.Position
+                end
+            end
+            
+            for _, child in ipairs(obj:GetChildren()) do
+                if child and child.Parent and child.ClassName:find("Part") then
+                    return child.Position
+                end
+            end
+        elseif obj.ClassName:find("Part") then
+            return obj.Position
+        end
+        
+        return nil
+    end)
+    
+    if success and result then
+        return result
+    end
+    
+    return nil
 end
 
-local function get_object_health(obj: Instance): (number?, number?)
-	if obj.ClassName ~= "Model" then
-		return nil, nil
-	end
-	
-	local success, health, max_health = pcall(function()
-		local humanoid = obj:FindFirstChildOfClass("Humanoid")
-		if humanoid then
-			return humanoid.Health, humanoid.MaxHealth
-		end
-		return nil, nil
-	end)
-	
-	if success then
-		return health, max_health
-	end
-	return nil, nil
+
+local function get_object_health(obj: Instance?): (number?, number?)
+    if not obj then
+        return nil, nil
+    end
+    
+    if obj ~= workspace then
+        local ok = pcall(function()
+            return obj.Parent
+        end)
+        if not ok or not obj.Parent then
+            return nil, nil
+        end
+    end
+    
+    if obj.ClassName ~= "Model" then
+        return nil, nil
+    end
+    
+    local success, health, max_health = pcall(function()
+        local humanoid = obj:FindFirstChildOfClass("Humanoid")
+        if humanoid and humanoid.Parent then  
+            return humanoid.Health, humanoid.MaxHealth
+        end
+        return nil, nil
+    end)
+    
+    if success then
+        return health, max_health
+    end
+    
+    return nil, nil
 end
+
 
 local function scan_path(path: Instance)
 	assert(typeof(path) == "Instance", "invalid path (Instance expected)")
