@@ -5,7 +5,7 @@
 local assert, typeof, tonumber = assert, typeof, tonumber
 local pcall, pairs, ipairs = pcall, pairs, ipairs
 local task_wait, task_spawn = task.wait, task.spawn
-local table_find, table_insert, table_remove, table_create, table_clear = table.find, table.insert, table.remove, table.create, table.clear
+local table_find, table_insert, table_remove, table_create, table_clear, table_sort = table.find, table.insert, table.remove, table.create, table.clear, table.sort
 local string_format, string_lower, string_split = string.format, string.lower, string.split
 local math_floor, math_sqrt, math_min, math_max = math.floor, math.sqrt, math.min, math.max
 local math_huge = math.huge
@@ -34,6 +34,7 @@ local DEFAULT_CONFIG = {
 	health_bar_color = Color3.new(0, 1, 0),
 	
 	max_distance = 1000,
+	max_render_objects = 200,
 	font_size = 14,
 	font = "Tamzen",
 	box_thickness = 2,
@@ -56,6 +57,7 @@ local BBOX_UPDATE_INTERVAL = 3
 local tracked_objects = {}
 local render_data = table_create(100)
 local render_data_size = 0
+local temp_render_data = table_create(1000)
 local active_paths = table_create(10)
 local include_filter = nil
 local exclude_filter = table_create(10)
@@ -460,7 +462,8 @@ local function update_loop()
 		cleanup_stale_objects()
 	end
 	
-	render_data_size = 0
+	table_clear(temp_render_data)
+	local temp_size = 0
 	
 	for obj_id, data in pairs(tracked_objects) do
 		local obj = data.object
@@ -522,22 +525,42 @@ local function update_loop()
 				health, max_health = get_object_health(obj)
 			end
 			
-			render_data_size = render_data_size + 1
-			
-			if not render_data[render_data_size] then
-				render_data[render_data_size] = {}
-			end
-			
-			local rd = render_data[render_data_size]
-			rd.name = data.name
-			rd.screen_pos = vector_create(screen.X, screen.Y, 0)
-			rd.distance = distance
-			rd.fade_opacity = fade_opacity
-			rd.box_min = box_min
-			rd.box_max = box_max
-			rd.health = health
-			rd.max_health = max_health
+			temp_size = temp_size + 1
+			temp_render_data[temp_size] = {
+				name = data.name,
+				screen_pos = vector_create(screen.X, screen.Y, 0),
+				distance = distance,
+				fade_opacity = fade_opacity,
+				box_min = box_min,
+				box_max = box_max,
+				health = health,
+				max_health = max_health,
+			}
 		end)
+	end
+	
+	table_sort(temp_render_data, function(a, b)
+		return a.distance < b.distance
+	end)
+	
+	render_data_size = math_min(temp_size, config.max_render_objects)
+	
+	for i = 1, render_data_size do
+		if not render_data[i] then
+			render_data[i] = {}
+		end
+		
+		local rd = render_data[i]
+		local temp_rd = temp_render_data[i]
+		
+		rd.name = temp_rd.name
+		rd.screen_pos = temp_rd.screen_pos
+		rd.distance = temp_rd.distance
+		rd.fade_opacity = temp_rd.fade_opacity
+		rd.box_min = temp_rd.box_min
+		rd.box_max = temp_rd.box_max
+		rd.health = temp_rd.health
+		rd.max_health = temp_rd.max_health
 	end
 end
 
