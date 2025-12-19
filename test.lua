@@ -527,10 +527,37 @@ RunService.PostLocal:Connect(function()
 			rd.box_max = box_max
 			rd.health = phys.health
 			rd.max_health = phys.max_health
+			
+			-- Pre-calculate ALL drawing positions and text
+			local y_offset = 0
+			
+			if config.name_esp then
+				local name_text = phys.name
+				if config.distance_esp then
+					name_text = name_text .. " [" .. math_floor(phys.distance) .. "m]"
+				end
+				rd.name_text = name_text
+				rd.name_pos = rd.screen_pos - vector_create(0, y_offset, 0)
+				y_offset = y_offset + config.font_size + 2
+			else
+				rd.name_text = nil
+			end
+			
+			if config.health_bar and phys.health and phys.max_health and phys.max_health > 0 then
+				local bar_width = 100
+				local bar_height = 4
+				local health_percent = phys.health / phys.max_health
+				
+				rd.bar_pos = rd.screen_pos - vector_create(bar_width * 0.5, y_offset, 0)
+				rd.bar_bg_size = vector_create(bar_width, bar_height, 0)
+				rd.bar_fill_size = vector_create(bar_width * health_percent, bar_height, 0)
+				y_offset = y_offset + bar_height + 4
+			else
+				rd.bar_pos = nil
+			end
 		end)
 	end
 end)
-
 
 RunService.Render:Connect(function()
 	if not config.enabled or not viewport_size or not screen_center then return end
@@ -539,7 +566,6 @@ RunService.Render:Connect(function()
 		local data = render_data[i]
 		if not data then break end
 		
-		local screen_pos = data.screen_pos
 		local fade = data.fade_opacity
 		
 		if config.box_esp and data.box_min and data.box_max then
@@ -552,54 +578,38 @@ RunService.Render:Connect(function()
 			)
 		end
 		
-		local y_offset = 0
-		
-		if config.name_esp then
-			local name_text = data.name
-			if config.distance_esp then
-				name_text = name_text .. " [" .. math_floor(data.distance) .. "m]"
-			end
-			
+		if config.name_esp and data.name_text then
 			DrawingImmediate.OutlinedText(
-				screen_pos - vector_create(0, y_offset, 0),
+				data.name_pos,
 				config.font_size,
 				config.name_color,
 				config.name_opacity * fade,
-				name_text,
+				data.name_text,
 				true,
 				config.font
 			)
-			
-			y_offset = y_offset + config.font_size + 2
 		end
 		
-		if config.health_bar and data.health and data.max_health and data.max_health > 0 then
-			local bar_width = 100
-			local bar_height = 4
-			local health_percent = data.health / data.max_health
-			local bar_pos = screen_pos - vector_create(bar_width * 0.5, y_offset, 0)
-			
+		if config.health_bar and data.bar_pos then
 			DrawingImmediate.FilledRectangle(
-				bar_pos,
-				vector_create(bar_width, bar_height, 0),
+				data.bar_pos,
+				data.bar_bg_size,
 				Color3.new(0.2, 0.2, 0.2),
 				0.8 * fade
 			)
 			
 			DrawingImmediate.FilledRectangle(
-				bar_pos,
-				vector_create(bar_width * health_percent, bar_height, 0),
+				data.bar_pos,
+				data.bar_fill_size,
 				config.health_bar_color,
 				0.9 * fade
 			)
-			
-			y_offset = y_offset + bar_height + 4
 		end
 		
 		if config.tracers then
 			DrawingImmediate.Line(
 				screen_center,
-				screen_pos,
+				data.screen_pos,
 				config.tracer_color,
 				config.tracer_opacity * fade,
 				1,
