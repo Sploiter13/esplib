@@ -421,7 +421,7 @@ RunService.PostModel:Connect(function()
 			profile_times.model = os.clock() - start
 end)
 
-RunService.PreData:Connect(function()
+RunService.PostData:Connect(function()
 					local start = os.clock()
 
 	if not config.enabled then return end
