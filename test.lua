@@ -5,10 +5,11 @@
 local assert, typeof = assert, typeof
 local pcall, pairs = pcall, pairs
 local table_insert, table_remove, table_create, table_clear = table.insert, table.remove, table.create, table.clear
-local string_lower, string_split = string.lower, string.split
+local string_format, string_lower, string_split = string.format, string.lower, string.split
 local math_floor, math_sqrt, math_min, math_max = math.floor, math.sqrt, math.min, math.max
 local math_huge = math.huge
 local vector_create = vector.create
+local os_clock = os.clock
 
 local game = game
 local workspace = game:GetService("Workspace")
@@ -18,38 +19,47 @@ local RunService = game:GetService("RunService")
 ---- constants ----
 local DEFAULT_CONFIG = {
 	enabled = true,
+	profiling = false,
+	
 	name_esp = true,
 	distance_esp = true,
 	box_esp = true,
 	health_bar = false,
 	tracers = false,
+	
 	exclude_players = false,
 	auto_exclude_localplayer = true,
+	
 	name_color = Color3.new(1, 1, 1),
 	box_color = Color3.new(1, 0, 0),
 	tracer_color = Color3.new(0, 1, 0),
 	health_bar_color = Color3.new(0, 1, 0),
+	
 	max_distance = 1000,
 	max_render_objects = 200,
 	font_size = 14,
 	font = "Tamzen",
 	box_thickness = 2,
 	tracer_thickness = 1,
+	
 	name_opacity = 1,
 	box_opacity = 0.8,
 	tracer_opacity = 0.6,
+	
 	fade_enabled = true,
 	fade_start = 500,
 	fade_end = 1000,
 }
 
 local PART_NAMES = {"HumanoidRootPart", "Head", "UpperTorso", "Torso"}
-local SCAN_INTERVAL = 30
-local BBOX_UPDATE_INTERVAL = 3
-local STALE_THRESHOLD = 2
+local SCAN_INTERVAL = 60
+local DESCENDANTS_CACHE_TIME = 2
+local STALE_THRESHOLD = 3
+local OBJECTS_PER_FRAME = 8
 
 ---- variables ----
 local tracked_objects = {}
+local descendants_cache = {}
 local physics_data = {}
 local sorted_physics = table_create(200)
 local sorted_count = 0
@@ -73,19 +83,36 @@ local config = {}
 local frame_count = 0
 local fade_range_inv = 1
 
-local profile_times = {
+local update_queue = table_create(100)
+local queue_index = 1
+
+---- profiling ----
+local profile_event_times = {
 	model = 0,
 	data = 0,
 	local_calc = 0,
-	render = 0
+	render = 0,
 }
 
-local update_queue = table_create(100)
-local queue_index = 1
-local objects_per_frame = 10
+local profile_function_times = {
+	get_position = 0,
+	get_descendants = 0,
+	calc_bbox = 0,
+	calc_corners = 0,
+	get_health = 0,
+	project_screen = 0,
+}
+
+local profile_counters = {
+	tracked_objects = 0,
+	rendered_objects = 0,
+	cache_hits = 0,
+	cache_misses = 0,
+}
 
 ---- cache pools ----
-local parts_cache = table_create(50)
+local parts_cache = table_create(100)
+local corners_cache = table_create(8)
 
 ---- functions ----
 local function deep_copy(tbl: {[any]: any}): {[any]: any}
@@ -102,7 +129,6 @@ local function calculate_fade_opacity(distance: number): number
 	elseif distance >= config.fade_end then
 		return 0
 	end
-	
 	return 1 - ((distance - config.fade_start) * fade_range_inv)
 end
 
@@ -179,6 +205,8 @@ local function should_track_object(obj: Instance): boolean
 end
 
 local function get_all_parts(obj: Instance): {Instance}
+	local prof_start = config.profiling and os_clock()
+	
 	table_clear(parts_cache)
 	
 	pcall(function()
@@ -189,23 +217,54 @@ local function get_all_parts(obj: Instance): {Instance}
 		if class_name:find("Part") then
 			parts_cache = obj[1]
 		elseif class_name == "Model" then
+			local obj_id = tostring(obj)
+			local cache_entry = descendants_cache[obj_id]
+			
+			if cache_entry and (os_clock() - cache_entry.time) < DESCENDANTS_CACHE_TIME then
+				if config.profiling then
+					profile_counters.cache_hits = profile_counters.cache_hits + 1
+				end
+				
+				for i = 1, #cache_entry.parts do
+					parts_cache[i] = cache_entry.parts[i]
+				end
+				return
+			end
+			
+			if config.profiling then
+				profile_counters.cache_misses = profile_counters.cache_misses + 1
+			end
+			
 			local descendants = obj:GetDescendants()
 			local count = 0
+			local cached_parts = table_create(50)
 			
 			for i = 1, #descendants do
 				local child = descendants[i]
 				if child.Parent and child.ClassName:find("Part") then
 					count = count + 1
 					parts_cache[count] = child
+					cached_parts[count] = child
 				end
 			end
+			
+			descendants_cache[obj_id] = {
+				parts = cached_parts,
+				time = os_clock(),
+			}
 		end
 	end)
+	
+	if config.profiling then
+		profile_function_times.get_descendants = profile_function_times.get_descendants + (os_clock() - prof_start)
+	end
 	
 	return parts_cache
 end
 
 local function calculate_bounding_box(parts: {Instance}): (vector?, vector?)
+	local prof_start = config.profiling and os_clock()
+	
 	if #parts == 0 then
 		return nil, nil
 	end
@@ -235,6 +294,10 @@ local function calculate_bounding_box(parts: {Instance}): (vector?, vector?)
 		end)
 	end
 	
+	if config.profiling then
+		profile_function_times.calc_bbox = profile_function_times.calc_bbox + (os_clock() - prof_start)
+	end
+	
 	if not found_any then
 		return nil, nil
 	end
@@ -243,22 +306,30 @@ local function calculate_bounding_box(parts: {Instance}): (vector?, vector?)
 end
 
 local function calculate_bounding_corners(min_bound: vector, max_bound: vector): {vector}
+	local prof_start = config.profiling and os_clock()
+	
 	local mnx, mny, mnz = min_bound.X, min_bound.Y, min_bound.Z
 	local mxx, mxy, mxz = max_bound.X, max_bound.Y, max_bound.Z
 	
-	return {
-		vector_create(mnx, mny, mnz),
-		vector_create(mxx, mny, mnz),
-		vector_create(mxx, mny, mxz),
-		vector_create(mnx, mny, mxz),
-		vector_create(mnx, mxy, mnz),
-		vector_create(mxx, mxy, mnz),
-		vector_create(mxx, mxy, mxz),
-		vector_create(mnx, mxy, mxz),
-	}
+	corners_cache = vector_create(mnx, mny, mnz)[1]
+	corners_cache = vector_create(mxx, mny, mnz)[2]
+	corners_cache = vector_create(mxx, mny, mxz)[3]
+	corners_cache = vector_create(mnx, mny, mxz)[4]
+	corners_cache = vector_create(mnx, mxy, mnz)[5]
+	corners_cache = vector_create(mxx, mxy, mnz)[6]
+	corners_cache = vector_create(mxx, mxy, mxz)[7]
+	corners_cache = vector_create(mnx, mxy, mxz)[8]
+	
+	if config.profiling then
+		profile_function_times.calc_corners = profile_function_times.calc_corners + (os_clock() - prof_start)
+	end
+	
+	return corners_cache
 end
 
 local function project_corners_to_screen(corners: {vector}, cam: Instance): (vector?, vector?)
+	local prof_start = config.profiling and os_clock()
+	
 	local min_x, min_y = math_huge, math_huge
 	local max_x, max_y = -math_huge, -math_huge
 	local any_visible = false
@@ -277,6 +348,10 @@ local function project_corners_to_screen(corners: {vector}, cam: Instance): (vec
 		end
 	end)
 	
+	if config.profiling then
+		profile_function_times.project_screen = profile_function_times.project_screen + (os_clock() - prof_start)
+	end
+	
 	if not any_visible then
 		return nil, nil
 	end
@@ -285,6 +360,8 @@ local function project_corners_to_screen(corners: {vector}, cam: Instance): (vec
 end
 
 local function get_object_position(obj: Instance): vector?
+	local prof_start = config.profiling and os_clock()
+	
 	local success, result = pcall(function()
 		if not obj.Parent then return nil end
 		
@@ -315,10 +392,16 @@ local function get_object_position(obj: Instance): vector?
 		return nil
 	end)
 	
+	if config.profiling then
+		profile_function_times.get_position = profile_function_times.get_position + (os_clock() - prof_start)
+	end
+	
 	return success and result or nil
 end
 
 local function get_object_health(obj: Instance): (number?, number?)
+	local prof_start = config.profiling and os_clock()
+	
 	local success, health, max_health = pcall(function()
 		if not obj.Parent or obj.ClassName ~= "Model" then
 			return nil, nil
@@ -330,6 +413,10 @@ local function get_object_health(obj: Instance): (number?, number?)
 		end
 		return nil, nil
 	end)
+	
+	if config.profiling then
+		profile_function_times.get_health = profile_function_times.get_health + (os_clock() - prof_start)
+	end
 	
 	return success and health or nil, success and max_health or nil
 end
@@ -356,29 +443,21 @@ local function scan_path(path: Instance)
 						obj_name = obj.Name
 					end)
 					
-					local parts = get_all_parts(obj)
-					local parts_copy = table_create(#parts_cache)
-					
-					for j = 1, #parts_cache do
-						parts_copy[j] = parts_cache[j]
-					end
-					
 					tracked_objects[obj_id] = {
 						object = obj,
 						name = obj_name or "Unknown",
-						parts = parts_copy,
-						last_seen = os.clock(),
+						last_seen = os_clock(),
 					}
 				end
 			else
-				tracked_objects[obj_id].last_seen = os.clock()
+				tracked_objects[obj_id].last_seen = os_clock()
 			end
 		end
 	end
 end
 
 local function cleanup_stale_objects()
-	local current_time = os.clock()
+	local current_time = os_clock()
 	
 	for obj_id, data in pairs(tracked_objects) do
 		local should_remove = (current_time - data.last_seen) > STALE_THRESHOLD
@@ -392,6 +471,7 @@ local function cleanup_stale_objects()
 		if should_remove then
 			tracked_objects[obj_id] = nil
 			physics_data[obj_id] = nil
+			descendants_cache[obj_id] = nil
 		end
 	end
 end
@@ -399,7 +479,8 @@ end
 ---- runtime ----
 
 RunService.PostModel:Connect(function()
-			local start = os.clock()
+	local prof_start = config.profiling and os_clock()
+	
 	if not config.enabled then return end
 	
 	frame_count = frame_count + 1
@@ -418,12 +499,15 @@ RunService.PostModel:Connect(function()
 		
 		cleanup_stale_objects()
 	end
-			profile_times.model = os.clock() - start
+	
+	if config.profiling then
+		profile_event_times.model = os_clock() - prof_start
+	end
 end)
 
 RunService.PostData:Connect(function()
-					local start = os.clock()
-
+	local prof_start = config.profiling and os_clock()
+	
 	if not config.enabled then return end
 	
 	pcall(function()
@@ -433,20 +517,18 @@ RunService.PostData:Connect(function()
 	
 	if not camera or not camera_position then return end
 	
-	-- Build update queue every 30 frames
 	if frame_count % 30 == 0 then
 		table_clear(update_queue)
 		local idx = 0
-		for obj_id, data in pairs(tracked_objects) do
+		for obj_id in pairs(tracked_objects) do
 			idx = idx + 1
 			update_queue[idx] = obj_id
 		end
 		queue_index = 1
 	end
 	
-	-- Process only N objects per frame
 	local processed = 0
-	while processed < objects_per_frame and queue_index <= #update_queue do
+	while processed < OBJECTS_PER_FRAME and queue_index <= #update_queue do
 		local obj_id = update_queue[queue_index]
 		queue_index = queue_index + 1
 		
@@ -456,11 +538,9 @@ RunService.PostData:Connect(function()
 				local obj = data.object
 				if not obj or not obj.Parent or should_exclude_object(obj) then return end
 				
-				-- Update position
 				local pos = get_object_position(obj)
 				if not pos then return end
 				
-				-- Calculate distance
 				local dx = pos.X - camera_position.X
 				local dy = pos.Y - camera_position.Y
 				local dz = pos.Z - camera_position.Z
@@ -468,24 +548,16 @@ RunService.PostData:Connect(function()
 				
 				if distance > config.max_distance then return end
 				
-				-- Update bounding box (heavy - do sparingly)
 				local corners = nil
-				if config.box_esp and not data.bbox_frame or (frame_count - data.bbox_frame) > 10 then
+				if config.box_esp then
 					local parts = get_all_parts(obj)
-					table_clear(data.parts)
+					local min_bound, max_bound = calculate_bounding_box(parts)
 					
-					for i = 1, #parts_cache do
-						data.parts[i] = parts_cache[i]
-					end
-					
-					local min_bound, max_bound = calculate_bounding_box(data.parts)
 					if min_bound and max_bound then
 						corners = calculate_bounding_corners(min_bound, max_bound)
 					end
-					data.bbox_frame = frame_count
 				end
 				
-				-- Update health (less expensive)
 				local health, max_health = nil, nil
 				if config.health_bar then
 					health, max_health = get_object_health(obj)
@@ -511,7 +583,6 @@ RunService.PostData:Connect(function()
 		processed = processed + 1
 	end
 	
-	-- Build sorted list from physics_data
 	table_clear(sorted_physics)
 	sorted_count = 0
 	
@@ -525,12 +596,16 @@ RunService.PostData:Connect(function()
 	table.sort(sorted_physics, function(a, b)
 		return a.distance < b.distance
 	end)
-	profile_times.data = os.clock() - start
+	
+	if config.profiling then
+		profile_counters.tracked_objects = sorted_count
+		profile_event_times.data = os_clock() - prof_start
+	end
 end)
 
 RunService.PostLocal:Connect(function()
-			local start = os.clock()
-
+	local prof_start = config.profiling and os_clock()
+	
 	if not config.enabled or not camera then return end
 	
 	pcall(function()
@@ -566,16 +641,11 @@ RunService.PostLocal:Connect(function()
 			end
 			
 			local rd = render_data[render_data_size]
-			rd.name = phys.name
 			rd.screen_pos = vector_create(screen.X, screen.Y, 0)
-			rd.distance = phys.distance
 			rd.fade_opacity = fade_opacity
 			rd.box_min = box_min
 			rd.box_max = box_max
-			rd.health = phys.health
-			rd.max_health = phys.max_health
 			
-			-- Pre-calculate ALL drawing positions and text
 			local y_offset = 0
 			
 			if config.name_esp then
@@ -598,19 +668,21 @@ RunService.PostLocal:Connect(function()
 				rd.bar_pos = rd.screen_pos - vector_create(bar_width * 0.5, y_offset, 0)
 				rd.bar_bg_size = vector_create(bar_width, bar_height, 0)
 				rd.bar_fill_size = vector_create(bar_width * health_percent, bar_height, 0)
-				y_offset = y_offset + bar_height + 4
 			else
 				rd.bar_pos = nil
 			end
 		end)
 	end
-			profile_times.local_calc = os.clock() - start
-
+	
+	if config.profiling then
+		profile_counters.rendered_objects = render_data_size
+		profile_event_times.local_calc = os_clock() - prof_start
+	end
 end)
 
 RunService.Render:Connect(function()
-			local start = os.clock()
-
+	local prof_start = config.profiling and os_clock()
+	
 	if not config.enabled or not viewport_size or not screen_center then return end
 	
 	for i = 1, render_data_size do
@@ -668,15 +740,39 @@ RunService.Render:Connect(function()
 			)
 		end
 	end
-		profile_times.render = os.clock() - start
 	
-	if frame_count % 60 == 0 then
-		print(string.format("Model: %.4fms | Data: %.4fms | Local: %.4fms | Render: %.4fms", 
-			profile_times.model * 1000,
-			profile_times.data * 1000,
-			profile_times.local_calc * 1000,
-			profile_times.render * 1000
-		))
+	if config.profiling then
+		profile_event_times.render = os_clock() - prof_start
+		
+		if frame_count % 60 == 0 then
+			print(string_format("\n==== ESP Performance Report ===="))
+			print(string_format("Events:"))
+			print(string_format("  Model:  %.4fms", profile_event_times.model * 1000))
+			print(string_format("  Data:   %.4fms", profile_event_times.data * 1000))
+			print(string_format("  Local:  %.4fms", profile_event_times.local_calc * 1000))
+			print(string_format("  Render: %.4fms", profile_event_times.render * 1000))
+			
+			print(string_format("\nFunctions:"))
+			print(string_format("  GetPosition:    %.4fms", profile_function_times.get_position * 1000))
+			print(string_format("  GetDescendants: %.4fms", profile_function_times.get_descendants * 1000))
+			print(string_format("  CalcBBox:       %.4fms", profile_function_times.calc_bbox * 1000))
+			print(string_format("  CalcCorners:    %.4fms", profile_function_times.calc_corners * 1000))
+			print(string_format("  ProjectScreen:  %.4fms", profile_function_times.project_screen * 1000))
+			print(string_format("  GetHealth:      %.4fms", profile_function_times.get_health * 1000))
+			
+			print(string_format("\nStats:"))
+			print(string_format("  Tracked:  %d", profile_counters.tracked_objects))
+			print(string_format("  Rendered: %d", profile_counters.rendered_objects))
+			print(string_format("  Cache Hits:   %d", profile_counters.cache_hits))
+			print(string_format("  Cache Misses: %d", profile_counters.cache_misses))
+			print(string_format("================================\n"))
+			
+			for k in pairs(profile_function_times) do
+				profile_function_times[k] = 0
+			end
+			profile_counters.cache_hits = 0
+			profile_counters.cache_misses = 0
+		end
 	end
 end)
 
@@ -795,6 +891,10 @@ function ESP.get_config(key: string): any
 	return config[key]
 end
 
+function ESP.enable_profiling(enabled: boolean)
+	config.profiling = enabled
+end
+
 function ESP.start()
 	config.enabled = true
 	frame_count = 0
@@ -804,6 +904,7 @@ function ESP.stop()
 	config.enabled = false
 	tracked_objects = {}
 	physics_data = {}
+	descendants_cache = {}
 	sorted_count = 0
 	render_data_size = 0
 end
