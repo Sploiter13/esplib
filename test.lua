@@ -493,10 +493,12 @@ RunService.PostLocal:Connect(function()
 	
 	if not viewport_size then return end
 	
-	render_data_size = math_min(sorted_count, config.max_render_objects)
+	render_data_size = 0
+	local max_render = math_min(sorted_count, config.max_render_objects)
 	
-	for i = 1, render_data_size do
+	for i = 1, max_render do
 		local phys = sorted_physics[i]
+		if not phys then break end
 		
 		pcall(function()
 			local screen, visible = camera:WorldToScreenPoint(phys.position)
@@ -510,11 +512,13 @@ RunService.PostLocal:Connect(function()
 				box_min, box_max = project_corners_to_screen(phys.corners, camera)
 			end
 			
-			if not render_data[i] then
-				render_data[i] = {}
+			render_data_size = render_data_size + 1
+			
+			if not render_data[render_data_size] then
+				render_data[render_data_size] = {}
 			end
 			
-			local rd = render_data[i]
+			local rd = render_data[render_data_size]
 			rd.name = phys.name
 			rd.screen_pos = vector_create(screen.X, screen.Y, 0)
 			rd.distance = phys.distance
@@ -526,6 +530,7 @@ RunService.PostLocal:Connect(function()
 		end)
 	end
 end)
+
 
 RunService.Render:Connect(function()
 	if not config.enabled or not viewport_size or not screen_center then return end
