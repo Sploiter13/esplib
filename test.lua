@@ -80,6 +80,10 @@ local profile_times = {
 	render = 0
 }
 
+local update_queue = table_create(100)
+local queue_index = 1
+local objects_per_frame = 10
+
 ---- cache pools ----
 local parts_cache = table_create(50)
 
@@ -418,7 +422,7 @@ RunService.PostModel:Connect(function()
 end)
 
 RunService.PostData:Connect(function()
-			local start = os.clock()
+					local start = os.clock()
 
 	if not config.enabled then return end
 	
@@ -429,71 +433,99 @@ RunService.PostData:Connect(function()
 	
 	if not camera or not camera_position then return end
 	
+	-- Build update queue every 30 frames
+	if frame_count % 30 == 0 then
+		table_clear(update_queue)
+		local idx = 0
+		for obj_id, data in pairs(tracked_objects) do
+			idx = idx + 1
+			update_queue[idx] = obj_id
+		end
+		queue_index = 1
+	end
+	
+	-- Process only N objects per frame
+	local processed = 0
+	while processed < objects_per_frame and queue_index <= #update_queue do
+		local obj_id = update_queue[queue_index]
+		queue_index = queue_index + 1
+		
+		local data = tracked_objects[obj_id]
+		if data then
+			pcall(function()
+				local obj = data.object
+				if not obj or not obj.Parent or should_exclude_object(obj) then return end
+				
+				-- Update position
+				local pos = get_object_position(obj)
+				if not pos then return end
+				
+				-- Calculate distance
+				local dx = pos.X - camera_position.X
+				local dy = pos.Y - camera_position.Y
+				local dz = pos.Z - camera_position.Z
+				local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
+				
+				if distance > config.max_distance then return end
+				
+				-- Update bounding box (heavy - do sparingly)
+				local corners = nil
+				if config.box_esp and not data.bbox_frame or (frame_count - data.bbox_frame) > 10 then
+					local parts = get_all_parts(obj)
+					table_clear(data.parts)
+					
+					for i = 1, #parts_cache do
+						data.parts[i] = parts_cache[i]
+					end
+					
+					local min_bound, max_bound = calculate_bounding_box(data.parts)
+					if min_bound and max_bound then
+						corners = calculate_bounding_corners(min_bound, max_bound)
+					end
+					data.bbox_frame = frame_count
+				end
+				
+				-- Update health (less expensive)
+				local health, max_health = nil, nil
+				if config.health_bar then
+					health, max_health = get_object_health(obj)
+				end
+				
+				if not physics_data[obj_id] then
+					physics_data[obj_id] = {}
+				end
+				
+				local phys = physics_data[obj_id]
+				phys.name = data.name
+				phys.position = pos
+				phys.distance = distance
+				phys.health = health
+				phys.max_health = max_health
+				
+				if corners then
+					phys.corners = corners
+				end
+			end)
+		end
+		
+		processed = processed + 1
+	end
+	
+	-- Build sorted list from physics_data
 	table_clear(sorted_physics)
 	sorted_count = 0
 	
-	for obj_id, data in pairs(tracked_objects) do
-		pcall(function()
-			local obj = data.object
-			if not obj or not obj.Parent or should_exclude_object(obj) then return end
-			
-			local pos = get_object_position(obj)
-			if not pos then return end
-			
-			if frame_count % BBOX_UPDATE_INTERVAL == 0 then
-				local parts = get_all_parts(obj)
-				table_clear(data.parts)
-				
-				for i = 1, #parts_cache do
-					data.parts[i] = parts_cache[i]
-				end
-			end
-			
-			local dx = pos.X - camera_position.X
-			local dy = pos.Y - camera_position.Y
-			local dz = pos.Z - camera_position.Z
-			local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
-			
-			if distance > config.max_distance then return end
-			
-			local corners = nil
-			if config.box_esp and frame_count % BBOX_UPDATE_INTERVAL == 0 then
-				local min_bound, max_bound = calculate_bounding_box(data.parts)
-				if min_bound and max_bound then
-					corners = calculate_bounding_corners(min_bound, max_bound)
-				end
-			end
-			
-			local health, max_health = nil, nil
-			if config.health_bar then
-				health, max_health = get_object_health(obj)
-			end
-			
-			if not physics_data[obj_id] then
-				physics_data[obj_id] = {}
-			end
-			
-			local phys = physics_data[obj_id]
-			phys.name = data.name
-			phys.position = pos
-			phys.distance = distance
-			phys.health = health
-			phys.max_health = max_health
-			
-			if corners then
-				phys.corners = corners
-			end
-			
+	for obj_id, phys in pairs(physics_data) do
+		if phys.position then
 			sorted_count = sorted_count + 1
 			sorted_physics[sorted_count] = phys
-		end)
+		end
 	end
 	
 	table.sort(sorted_physics, function(a, b)
 		return a.distance < b.distance
 	end)
-			profile_times.data = os.clock() - start
-
+	profile_times.data = os.clock() - start
 end)
 
 RunService.PostLocal:Connect(function()
