@@ -641,11 +641,15 @@ RunService.PostLocal:Connect(function()
 			render_data_size = render_data_size + 1
 			
 			if not render_data[render_data_size] then
-				render_data[render_data_size] = {}
+				render_data[render_data_size] = {
+					last_distance = -1,
+					cached_text = "",
+				}
 			end
 			
 			local rd = render_data[render_data_size]
-			rd.screen_pos = vector_create(screen.X, screen.Y, 0)
+			local screen_x, screen_y = screen.X, screen.Y
+			rd.screen_pos = vector_create(screen_x, screen_y, 0)
 			rd.fade_opacity = fade_opacity
 			rd.box_min = box_min
 			rd.box_max = box_max
@@ -653,12 +657,15 @@ RunService.PostLocal:Connect(function()
 			local y_offset = 0
 			
 			if config.name_esp then
-				local name_text = phys.name
-				if config.distance_esp then
-					name_text = name_text .. " [" .. math_floor(phys.distance) .. "m]"
+				local dist_floored = math_floor(phys.distance)
+				
+				if dist_floored ~= rd.last_distance then
+					rd.last_distance = dist_floored
+					rd.cached_text = config.distance_esp and (phys.name .. " [" .. dist_floored .. "m]") or phys.name
 				end
-				rd.name_text = name_text
-				rd.name_pos = rd.screen_pos - vector_create(0, y_offset, 0)
+				
+				rd.name_text = rd.cached_text
+				rd.name_pos = vector_create(screen_x, screen_y - y_offset, 0)
 				y_offset = y_offset + config.font_size + 2
 			else
 				rd.name_text = nil
@@ -669,7 +676,7 @@ RunService.PostLocal:Connect(function()
 				local bar_height = 4
 				local health_percent = phys.health / phys.max_health
 				
-				rd.bar_pos = rd.screen_pos - vector_create(bar_width * 0.5, y_offset, 0)
+				rd.bar_pos = vector_create(screen_x - bar_width * 0.5, screen_y - y_offset, 0)
 				rd.bar_bg_size = vector_create(bar_width, bar_height, 0)
 				rd.bar_fill_size = vector_create(bar_width * health_percent, bar_height, 0)
 			else
@@ -683,6 +690,7 @@ RunService.PostLocal:Connect(function()
 		profile_event_times.local_calc = os_clock() - prof_start
 	end
 end)
+
 
 RunService.Render:Connect(function()
 	local prof_start = config.profiling and os_clock()
