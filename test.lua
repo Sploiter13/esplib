@@ -56,7 +56,8 @@ local SCAN_INTERVAL = 60
 local DESCENDANTS_CACHE_TIME = 2
 local STALE_THRESHOLD = 3
 local OBJECTS_PER_FRAME = 8
-
+local LOD_DISTANCE_CLOSE = 200
+local LOD_DISTANCE_MEDIUM = 500
 ---- variables ----
 local tracked_objects = {}
 local descendants_cache = {}
@@ -633,11 +634,6 @@ RunService.PostLocal:Connect(function()
 			local fade_opacity = calculate_fade_opacity(phys.distance)
 			if fade_opacity <= 0 then return end
 			
-			local box_min, box_max = nil, nil
-			if config.box_esp and phys.corners then
-				box_min, box_max = project_corners_to_screen(phys.corners, camera)
-			end
-			
 			render_data_size = render_data_size + 1
 			
 			if not render_data[render_data_size] then
@@ -649,19 +645,41 @@ RunService.PostLocal:Connect(function()
 			
 			local rd = render_data[render_data_size]
 			local screen_x, screen_y = screen.X, screen.Y
+			local distance = phys.distance
+			
 			rd.screen_pos = vector_create(screen_x, screen_y, 0)
 			rd.fade_opacity = fade_opacity
-			rd.box_min = box_min
-			rd.box_max = box_max
+			rd.distance = distance
 			
+			-- LOD: Determine quality level
+			local is_close = distance < LOD_DISTANCE_CLOSE
+			local is_medium = distance < LOD_DISTANCE_MEDIUM
+			
+			-- Pre-calculate box (only if enabled and corners exist)
+			if config.box_esp and phys.corners then
+				local box_min, box_max = project_corners_to_screen(phys.corners, camera)
+				if box_min and box_max then
+					rd.box_min = box_min
+					rd.box_size = box_max - box_min
+				else
+					rd.box_min = nil
+				end
+			else
+				rd.box_min = nil
+			end
+			
+			-- Pre-calculate name text and position
 			local y_offset = 0
-			
 			if config.name_esp then
-				local dist_floored = math_floor(phys.distance)
+				local dist_floored = math_floor(distance)
 				
 				if dist_floored ~= rd.last_distance then
 					rd.last_distance = dist_floored
-					rd.cached_text = config.distance_esp and (phys.name .. " [" .. dist_floored .. "m]") or phys.name
+					if config.distance_esp and is_medium then
+						rd.cached_text = phys.name .. " [" .. dist_floored .. "m]"
+					else
+						rd.cached_text = phys.name
+					end
 				end
 				
 				rd.name_text = rd.cached_text
@@ -671,17 +689,24 @@ RunService.PostLocal:Connect(function()
 				rd.name_text = nil
 			end
 			
-			if config.health_bar and phys.health and phys.max_health and phys.max_health > 0 then
-				local bar_width = 100
+			-- Pre-calculate health bar (only for close/medium distance)
+			if config.health_bar and is_medium and phys.health and phys.max_health and phys.max_health > 0 then
+				local bar_width = is_close and 100 or 60
 				local bar_height = 4
 				local health_percent = phys.health / phys.max_health
 				
+				rd.bar_enabled = true
 				rd.bar_pos = vector_create(screen_x - bar_width * 0.5, screen_y - y_offset, 0)
 				rd.bar_bg_size = vector_create(bar_width, bar_height, 0)
 				rd.bar_fill_size = vector_create(bar_width * health_percent, bar_height, 0)
+				rd.bar_opacity_bg = is_close and 0.8 or 0.6
+				rd.bar_opacity_fill = is_close and 0.9 or 0.7
 			else
-				rd.bar_pos = nil
+				rd.bar_enabled = false
 			end
+			
+			-- Tracers (only for medium distance or closer)
+			rd.draw_tracer = config.tracers and is_medium
 		end)
 	end
 	
@@ -690,7 +715,6 @@ RunService.PostLocal:Connect(function()
 		profile_event_times.local_calc = os_clock() - prof_start
 	end
 end)
-
 
 RunService.Render:Connect(function()
 	local prof_start = config.profiling and os_clock()
@@ -703,10 +727,10 @@ RunService.Render:Connect(function()
 		
 		local fade = data.fade_opacity
 		
-		if config.box_esp and data.box_min and data.box_max then
+		if config.box_esp and data.box_min then
 			DrawingImmediate.Rectangle(
 				data.box_min,
-				data.box_max - data.box_min,
+				data.box_size,
 				config.box_color,
 				config.box_opacity * fade,
 				config.box_thickness
@@ -725,23 +749,23 @@ RunService.Render:Connect(function()
 			)
 		end
 		
-		if config.health_bar and data.bar_pos then
+		if data.bar_enabled then
 			DrawingImmediate.FilledRectangle(
 				data.bar_pos,
 				data.bar_bg_size,
 				Color3.new(0.2, 0.2, 0.2),
-				0.8 * fade
+				data.bar_opacity_bg * fade
 			)
 			
 			DrawingImmediate.FilledRectangle(
 				data.bar_pos,
 				data.bar_fill_size,
 				config.health_bar_color,
-				0.9 * fade
+				data.bar_opacity_fill * fade
 			)
 		end
 		
-		if config.tracers then
+		if data.draw_tracer then
 			DrawingImmediate.Line(
 				screen_center,
 				data.screen_pos,
@@ -787,6 +811,7 @@ RunService.Render:Connect(function()
 		end
 	end
 end)
+
 
 ---- module ----
 local ESP = {}
