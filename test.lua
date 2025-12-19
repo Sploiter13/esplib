@@ -73,6 +73,13 @@ local config = {}
 local frame_count = 0
 local fade_range_inv = 1
 
+local profile_times = {
+	model = 0,
+	data = 0,
+	local_calc = 0,
+	render = 0
+}
+
 ---- cache pools ----
 local parts_cache = table_create(50)
 
@@ -388,6 +395,7 @@ end
 ---- runtime ----
 
 RunService.PostModel:Connect(function()
+			local start = os.clock()
 	if not config.enabled then return end
 	
 	frame_count = frame_count + 1
@@ -406,9 +414,12 @@ RunService.PostModel:Connect(function()
 		
 		cleanup_stale_objects()
 	end
+			profile_times.model = os.clock() - start
 end)
 
 RunService.PostData:Connect(function()
+			local start = os.clock()
+
 	if not config.enabled then return end
 	
 	pcall(function()
@@ -481,9 +492,13 @@ RunService.PostData:Connect(function()
 	table.sort(sorted_physics, function(a, b)
 		return a.distance < b.distance
 	end)
+			profile_times.data = os.clock() - start
+
 end)
 
 RunService.PostLocal:Connect(function()
+			local start = os.clock()
+
 	if not config.enabled or not camera then return end
 	
 	pcall(function()
@@ -557,9 +572,13 @@ RunService.PostLocal:Connect(function()
 			end
 		end)
 	end
+			profile_times.local_calc = os.clock() - start
+
 end)
 
 RunService.Render:Connect(function()
+			local start = os.clock()
+
 	if not config.enabled or not viewport_size or not screen_center then return end
 	
 	for i = 1, render_data_size do
@@ -616,6 +635,16 @@ RunService.Render:Connect(function()
 				config.tracer_thickness
 			)
 		end
+	end
+		profile_times.render = os.clock() - start
+	
+	if frame_count % 60 == 0 then
+		print(string.format("Model: %.4fms | Data: %.4fms | Local: %.4fms | Render: %.4fms", 
+			profile_times.model * 1000,
+			profile_times.data * 1000,
+			profile_times.local_calc * 1000,
+			profile_times.render * 1000
+		))
 	end
 end)
 
