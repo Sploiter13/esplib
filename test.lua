@@ -4,7 +4,7 @@
 ---- environment ----
 local assert, typeof = assert, typeof
 local pcall, pairs = pcall, pairs
-local table_insert, table_remove, table_create, table_clear, table_sort = table.insert, table.remove, table.create, table.clear, table.sort
+local table_insert, table_remove, table_create, table_clear = table.insert, table.remove, table.create, table.clear
 local string_lower, string_split = string.lower, string.split
 local math_floor, math_sqrt, math_min, math_max = math.floor, math.sqrt, math.min, math.max
 local math_huge = math.huge
@@ -51,6 +51,9 @@ local STALE_THRESHOLD = 2
 ---- variables ----
 local tracked_objects = {}
 local physics_data = {}
+local sorted_physics = table_create(200)
+local sorted_count = 0
+
 local render_data = table_create(200)
 local render_data_size = 0
 
@@ -72,8 +75,6 @@ local fade_range_inv = 1
 
 ---- cache pools ----
 local parts_cache = table_create(50)
-local corners_cache = table_create(8)
-local temp_render_cache = table_create(200)
 
 ---- functions ----
 local function deep_copy(tbl: {[any]: any}): {[any]: any}
@@ -230,23 +231,23 @@ local function calculate_bounding_box(parts: {Instance}): (vector?, vector?)
 	return vector_create(min_x, min_y, min_z), vector_create(max_x, max_y, max_z)
 end
 
-local function get_bounding_corners(min_bound: vector, max_bound: vector): {vector}
+local function calculate_bounding_corners(min_bound: vector, max_bound: vector): {vector}
 	local mnx, mny, mnz = min_bound.X, min_bound.Y, min_bound.Z
 	local mxx, mxy, mxz = max_bound.X, max_bound.Y, max_bound.Z
 	
-	corners_cache = vector_create(mnx, mny, mnz)[1]
-	corners_cache = vector_create(mxx, mny, mnz)[2]
-	corners_cache = vector_create(mxx, mny, mxz)[3]
-	corners_cache = vector_create(mnx, mny, mxz)[4]
-	corners_cache = vector_create(mnx, mxy, mnz)[5]
-	corners_cache = vector_create(mxx, mxy, mnz)[6]
-	corners_cache = vector_create(mxx, mxy, mxz)[7]
-	corners_cache = vector_create(mnx, mxy, mxz)[8]
-	
-	return corners_cache
+	return {
+		vector_create(mnx, mny, mnz),
+		vector_create(mxx, mny, mnz),
+		vector_create(mxx, mny, mxz),
+		vector_create(mnx, mny, mxz),
+		vector_create(mnx, mxy, mnz),
+		vector_create(mxx, mxy, mnz),
+		vector_create(mxx, mxy, mxz),
+		vector_create(mnx, mxy, mxz),
+	}
 end
 
-local function project_box_to_screen(corners: {vector}, cam: Instance): (vector?, vector?)
+local function project_corners_to_screen(corners: {vector}, cam: Instance): (vector?, vector?)
 	local min_x, min_y = math_huge, math_huge
 	local max_x, max_y = -math_huge, -math_huge
 	local any_visible = false
@@ -417,6 +418,9 @@ RunService.PostData:Connect(function()
 	
 	if not camera or not camera_position then return end
 	
+	table_clear(sorted_physics)
+	sorted_count = 0
+	
 	for obj_id, data in pairs(tracked_objects) do
 		pcall(function()
 			local obj = data.object
@@ -441,9 +445,12 @@ RunService.PostData:Connect(function()
 			
 			if distance > config.max_distance then return end
 			
-			local min_bound, max_bound = nil, nil
+			local corners = nil
 			if config.box_esp and frame_count % BBOX_UPDATE_INTERVAL == 0 then
-				min_bound, max_bound = calculate_bounding_box(data.parts)
+				local min_bound, max_bound = calculate_bounding_box(data.parts)
+				if min_bound and max_bound then
+					corners = calculate_bounding_corners(min_bound, max_bound)
+				end
 			end
 			
 			local health, max_health = nil, nil
@@ -459,12 +466,21 @@ RunService.PostData:Connect(function()
 			phys.name = data.name
 			phys.position = pos
 			phys.distance = distance
-			phys.min_bound = min_bound
-			phys.max_bound = max_bound
 			phys.health = health
 			phys.max_health = max_health
+			
+			if corners then
+				phys.corners = corners
+			end
+			
+			sorted_count = sorted_count + 1
+			sorted_physics[sorted_count] = phys
 		end)
 	end
+	
+	table.sort(sorted_physics, function(a, b)
+		return a.distance < b.distance
+	end)
 end)
 
 RunService.PostLocal:Connect(function()
@@ -477,10 +493,11 @@ RunService.PostLocal:Connect(function()
 	
 	if not viewport_size then return end
 	
-	table_clear(temp_render_cache)
-	local temp_size = 0
+	render_data_size = math_min(sorted_count, config.max_render_objects)
 	
-	for obj_id, phys in pairs(physics_data) do
+	for i = 1, render_data_size do
+		local phys = sorted_physics[i]
+		
 		pcall(function()
 			local screen, visible = camera:WorldToScreenPoint(phys.position)
 			if not visible then return end
@@ -489,47 +506,24 @@ RunService.PostLocal:Connect(function()
 			if fade_opacity <= 0 then return end
 			
 			local box_min, box_max = nil, nil
-			if config.box_esp and phys.min_bound and phys.max_bound then
-				local corners = get_bounding_corners(phys.min_bound, phys.max_bound)
-				box_min, box_max = project_box_to_screen(corners, camera)
+			if config.box_esp and phys.corners then
+				box_min, box_max = project_corners_to_screen(phys.corners, camera)
 			end
 			
-			temp_size = temp_size + 1
-			temp_render_cache[temp_size] = {
-				name = phys.name,
-				screen_pos = vector_create(screen.X, screen.Y, 0),
-				distance = phys.distance,
-				fade_opacity = fade_opacity,
-				box_min = box_min,
-				box_max = box_max,
-				health = phys.health,
-				max_health = phys.max_health,
-			}
+			if not render_data[i] then
+				render_data[i] = {}
+			end
+			
+			local rd = render_data[i]
+			rd.name = phys.name
+			rd.screen_pos = vector_create(screen.X, screen.Y, 0)
+			rd.distance = phys.distance
+			rd.fade_opacity = fade_opacity
+			rd.box_min = box_min
+			rd.box_max = box_max
+			rd.health = phys.health
+			rd.max_health = phys.max_health
 		end)
-	end
-	
-	table_sort(temp_render_cache, function(a, b)
-		return a.distance < b.distance
-	end)
-	
-	render_data_size = math_min(temp_size, config.max_render_objects)
-	
-	for i = 1, render_data_size do
-		if not render_data[i] then
-			render_data[i] = {}
-		end
-		
-		local rd = render_data[i]
-		local temp = temp_render_cache[i]
-		
-		rd.name = temp.name
-		rd.screen_pos = temp.screen_pos
-		rd.distance = temp.distance
-		rd.fade_opacity = temp.fade_opacity
-		rd.box_min = temp.box_min
-		rd.box_max = temp.box_max
-		rd.health = temp.health
-		rd.max_health = temp.max_health
 	end
 end)
 
@@ -538,6 +532,8 @@ RunService.Render:Connect(function()
 	
 	for i = 1, render_data_size do
 		local data = render_data[i]
+		if not data then break end
+		
 		local screen_pos = data.screen_pos
 		local fade = data.fade_opacity
 		
@@ -732,6 +728,7 @@ function ESP.stop()
 	config.enabled = false
 	tracked_objects = {}
 	physics_data = {}
+	sorted_count = 0
 	render_data_size = 0
 end
 
