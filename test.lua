@@ -517,7 +517,40 @@ RunService.PostData:Connect(function()
 	
 	if not camera or not camera_position then return end
 	
-	if frame_count % 30 == 0 then
+	-- Update ALL positions every frame (lightweight)
+	for obj_id, data in pairs(tracked_objects) do
+		pcall(function()
+			local obj = data.object
+			if not obj or not obj.Parent or should_exclude_object(obj) then return end
+			
+			local pos = get_object_position(obj)
+			if not pos then return end
+			
+			local dx = pos.X - camera_position.X
+			local dy = pos.Y - camera_position.Y
+			local dz = pos.Z - camera_position.Z
+			local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
+			
+			if distance > config.max_distance then return end
+			
+			if not physics_data[obj_id] then
+				physics_data[obj_id] = {}
+			end
+			
+			local phys = physics_data[obj_id]
+			phys.name = data.name
+			phys.position = pos
+			phys.distance = distance
+			
+			-- Update health every frame (cheap)
+			if config.health_bar then
+				phys.health, phys.max_health = get_object_health(obj)
+			end
+		end)
+	end
+	
+	-- Update bounding boxes in queue (expensive, spread across frames)
+	if frame_count % 5 == 0 then
 		table_clear(update_queue)
 		local idx = 0
 		for obj_id in pairs(tracked_objects) do
@@ -533,49 +566,18 @@ RunService.PostData:Connect(function()
 		queue_index = queue_index + 1
 		
 		local data = tracked_objects[obj_id]
-		if data then
+		local phys = physics_data[obj_id]
+		
+		if data and phys and config.box_esp then
 			pcall(function()
 				local obj = data.object
-				if not obj or not obj.Parent or should_exclude_object(obj) then return end
+				if not obj or not obj.Parent then return end
 				
-				local pos = get_object_position(obj)
-				if not pos then return end
+				local parts = get_all_parts(obj)
+				local min_bound, max_bound = calculate_bounding_box(parts)
 				
-				local dx = pos.X - camera_position.X
-				local dy = pos.Y - camera_position.Y
-				local dz = pos.Z - camera_position.Z
-				local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
-				
-				if distance > config.max_distance then return end
-				
-				local corners = nil
-				if config.box_esp then
-					local parts = get_all_parts(obj)
-					local min_bound, max_bound = calculate_bounding_box(parts)
-					
-					if min_bound and max_bound then
-						corners = calculate_bounding_corners(min_bound, max_bound)
-					end
-				end
-				
-				local health, max_health = nil, nil
-				if config.health_bar then
-					health, max_health = get_object_health(obj)
-				end
-				
-				if not physics_data[obj_id] then
-					physics_data[obj_id] = {}
-				end
-				
-				local phys = physics_data[obj_id]
-				phys.name = data.name
-				phys.position = pos
-				phys.distance = distance
-				phys.health = health
-				phys.max_health = max_health
-				
-				if corners then
-					phys.corners = corners
+				if min_bound and max_bound then
+					phys.corners = calculate_bounding_corners(min_bound, max_bound)
 				end
 			end)
 		end
@@ -583,6 +585,7 @@ RunService.PostData:Connect(function()
 		processed = processed + 1
 	end
 	
+	-- Sort by distance
 	table_clear(sorted_physics)
 	sorted_count = 0
 	
@@ -602,6 +605,7 @@ RunService.PostData:Connect(function()
 		profile_event_times.data = os_clock() - prof_start
 	end
 end)
+
 
 RunService.PostLocal:Connect(function()
 	local prof_start = config.profiling and os_clock()
