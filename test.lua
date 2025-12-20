@@ -582,8 +582,15 @@ local function check_and_toggle_static_mode()
 end
 
 ---- runtime ----
+local function initialize_events()
+	if config.enabled == nil then
+		config = deep_copy(DEFAULT_CONFIG)
+	end
+end
 
 RunService.PostModel:Connect(function()
+	initialize_events()
+	
 	local prof_start = config.profiling and os_clock()
 	
 	if not config.enabled then return end
@@ -612,6 +619,8 @@ RunService.PostModel:Connect(function()
 end)
 
 RunService.PostData:Connect(function()
+	initialize_events()
+	
 	local prof_start = config.profiling and os_clock()
 	
 	if not config.enabled then return end
@@ -666,18 +675,15 @@ RunService.PostData:Connect(function()
 									distance = distance,
 								}
 								
-								-- Calculate bounding box for static objects
 								if config.box_esp then
 									local obj = data.object
 									if obj and obj.Parent then
-										-- Use cached corners if available and recently updated
 										if not static_data.corners or (frame_count - static_data.last_update) > STATIC_POSITION_UPDATE_INTERVAL then
 											local parts = get_all_parts(obj)
 											local min_bound, max_bound = calculate_bounding_box(parts)
 											
 											if min_bound and max_bound then
 												local corners = calculate_bounding_corners(min_bound, max_bound)
-												-- Cache corners in static data
 												static_data.corners = table_create(8)
 												for j = 1, 8 do
 													static_data.corners[j] = corners[j]
@@ -690,7 +696,6 @@ RunService.PostData:Connect(function()
 									end
 								end
 								
-								-- Update health for static objects
 								if config.health_bar then
 									local obj = data.object
 									if obj and obj.Parent then
@@ -709,7 +714,6 @@ RunService.PostData:Connect(function()
 			profile_counters.objects_in_chunks = objects_checked
 		end
 	else
-		-- Normal mode (unchanged)
 		for obj_id, data in pairs(tracked_objects) do
 			pcall(function()
 				local obj = data.object
@@ -797,6 +801,8 @@ RunService.PostData:Connect(function()
 end)
 
 RunService.PostLocal:Connect(function()
+	initialize_events()
+	
 	local prof_start = config.profiling and os_clock()
 	
 	if not config.enabled or not camera then return end
@@ -900,6 +906,8 @@ RunService.PostLocal:Connect(function()
 end)
 
 RunService.Render:Connect(function()
+	initialize_events()
+	
 	local prof_start = config.profiling and os_clock()
 	
 	if not config.enabled or not viewport_size or not screen_center then return end
