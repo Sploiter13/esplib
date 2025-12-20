@@ -665,6 +665,38 @@ RunService.PostData:Connect(function()
 									position = pos,
 									distance = distance,
 								}
+								
+								-- Calculate bounding box for static objects
+								if config.box_esp then
+									local obj = data.object
+									if obj and obj.Parent then
+										-- Use cached corners if available and recently updated
+										if not static_data.corners or (frame_count - static_data.last_update) > STATIC_POSITION_UPDATE_INTERVAL then
+											local parts = get_all_parts(obj)
+											local min_bound, max_bound = calculate_bounding_box(parts)
+											
+											if min_bound and max_bound then
+												local corners = calculate_bounding_corners(min_bound, max_bound)
+												-- Cache corners in static data
+												static_data.corners = table_create(8)
+												for j = 1, 8 do
+													static_data.corners[j] = corners[j]
+												end
+												physics_data[obj_id].corners = static_data.corners
+											end
+										else
+											physics_data[obj_id].corners = static_data.corners
+										end
+									end
+								end
+								
+								-- Update health for static objects
+								if config.health_bar then
+									local obj = data.object
+									if obj and obj.Parent then
+										physics_data[obj_id].health, physics_data[obj_id].max_health = get_object_health(obj)
+									end
+								end
 							end
 						end)
 					end
@@ -677,6 +709,7 @@ RunService.PostData:Connect(function()
 			profile_counters.objects_in_chunks = objects_checked
 		end
 	else
+		-- Normal mode (unchanged)
 		for obj_id, data in pairs(tracked_objects) do
 			pcall(function()
 				local obj = data.object
