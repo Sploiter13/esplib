@@ -16,15 +16,6 @@ local workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
-
-local function deep_copy(tbl: {[any]: any}): {[any]: any}
-	local copy = table_create(10)
-	for k, v in pairs(tbl) do
-		copy[k] = typeof(v) == "table" and deep_copy(v) or v
-	end
-	return copy
-end
-
 ---- constants ----
 local DEFAULT_CONFIG = {
 	enabled = false,
@@ -141,6 +132,14 @@ local parts_cache = table_create(100)
 local corners_cache = table_create(8)
 
 ---- functions ----
+local function deep_copy(tbl: {[any]: any}): {[any]: any}
+	local copy = table_create(10)
+	for k, v in pairs(tbl) do
+		copy[k] = typeof(v) == "table" and deep_copy(v) or v
+	end
+	return copy
+end
+
 local function calculate_fade_opacity(distance: number): number
 	if not config.fade_enabled or distance <= config.fade_start then
 		return 1
