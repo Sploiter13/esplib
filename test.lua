@@ -96,7 +96,7 @@ local screen_center = nil
 local local_player = nil
 local local_character = nil
 
-local config = deep_copy(DEFAULT_CONFIG)
+local config = {}
 local frame_count = 0
 local fade_range_inv = 1
 
