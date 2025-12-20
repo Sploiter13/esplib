@@ -19,7 +19,7 @@ local RunService = game:GetService("RunService")
 ---- constants ----
 local DEFAULT_CONFIG = {
 	enabled = true,
-	profiling = true,
+	profiling = false,
 	static_mode = false,
 	auto_static_mode = true,
 	static_threshold = 1000,
@@ -87,7 +87,7 @@ local screen_center = nil
 local local_player = nil
 local local_character = nil
 
-local config = {}
+local config = deep_copy or function(t) return t end
 local frame_count = 0
 local fade_range_inv = 1
 
@@ -279,7 +279,7 @@ local function get_all_parts(obj: Instance): {Instance}
 		local class_name = obj.ClassName
 		
 		if class_name:find("Part") then
-			parts_cache = obj[1]
+			parts_cache[1] = obj
 		elseif class_name == "Model" then
 			local obj_id = tostring(obj)
 			local cache_entry = descendants_cache[obj_id]
@@ -375,14 +375,14 @@ local function calculate_bounding_corners(min_bound: vector, max_bound: vector):
 	local mnx, mny, mnz = min_bound.X, min_bound.Y, min_bound.Z
 	local mxx, mxy, mxz = max_bound.X, max_bound.Y, max_bound.Z
 	
-	corners_cache = vector_create(mnx, mny, mnz)[1]
-	corners_cache = vector_create(mxx, mny, mnz)[2]
-	corners_cache = vector_create(mxx, mny, mxz)[3]
-	corners_cache = vector_create(mnx, mny, mxz)[4]
-	corners_cache = vector_create(mnx, mxy, mnz)[5]
-	corners_cache = vector_create(mxx, mxy, mnz)[6]
-	corners_cache = vector_create(mxx, mxy, mxz)[7]
-	corners_cache = vector_create(mnx, mxy, mxz)[8]
+	corners_cache[1] = vector_create(mnx, mny, mnz)
+	corners_cache[2] = vector_create(mxx, mny, mnz)
+	corners_cache[3] = vector_create(mxx, mny, mxz)
+	corners_cache[4] = vector_create(mnx, mny, mxz)
+	corners_cache[5] = vector_create(mnx, mxy, mnz)
+	corners_cache[6] = vector_create(mxx, mxy, mnz)
+	corners_cache[7] = vector_create(mxx, mxy, mxz)
+	corners_cache[8] = vector_create(mnx, mxy, mxz)
 	
 	if config.profiling then
 		profile_function_times.calc_corners = profile_function_times.calc_corners + (os_clock() - prof_start)
@@ -582,18 +582,10 @@ local function check_and_toggle_static_mode()
 end
 
 ---- runtime ----
-local function initialize_events()
-	if config.enabled == nil then
-		config = deep_copy(DEFAULT_CONFIG)
-	end
-end
-
 RunService.PostModel:Connect(function()
-	initialize_events()
+	if not config or not config.enabled then return end
 	
 	local prof_start = config.profiling and os_clock()
-	
-	if not config.enabled then return end
 	
 	frame_count = frame_count + 1
 	
@@ -619,11 +611,9 @@ RunService.PostModel:Connect(function()
 end)
 
 RunService.PostData:Connect(function()
-	initialize_events()
+	if not config or not config.enabled then return end
 	
 	local prof_start = config.profiling and os_clock()
-	
-	if not config.enabled then return end
 	
 	pcall(function()
 		camera = workspace.CurrentCamera
@@ -801,11 +791,9 @@ RunService.PostData:Connect(function()
 end)
 
 RunService.PostLocal:Connect(function()
-	initialize_events()
+	if not config or not config.enabled or not camera then return end
 	
 	local prof_start = config.profiling and os_clock()
-	
-	if not config.enabled or not camera then return end
 	
 	pcall(function()
 		viewport_size = camera.ViewportSize
@@ -906,11 +894,9 @@ RunService.PostLocal:Connect(function()
 end)
 
 RunService.Render:Connect(function()
-	initialize_events()
+	if not config or not config.enabled or not viewport_size or not screen_center then return end
 	
 	local prof_start = config.profiling and os_clock()
-	
-	if not config.enabled or not viewport_size or not screen_center then return end
 	
 	for i = 1, render_data_size do
 		local data = render_data[i]
@@ -1034,6 +1020,8 @@ function ESP.new(settings: {[string]: any}?): typeof(ESP)
 	
 	update_local_player()
 	
+	print(string_format("[ESP] Initialized - Profiling: %s", config.profiling and "ENABLED" or "DISABLED"))
+	
 	return ESP
 end
 
@@ -1074,6 +1062,7 @@ function ESP.add_path(path: Instance | string): boolean
 	end
 	
 	table_insert(active_paths, actual_path)
+	print(string_format("[ESP] Added path: %s", tostring(actual_path)))
 	return true
 end
 
@@ -1139,6 +1128,7 @@ end
 
 function ESP.enable_profiling(enabled: boolean)
 	config.profiling = enabled
+	print(string_format("[ESP] Profiling: %s", enabled and "ENABLED" or "DISABLED"))
 end
 
 function ESP.is_static_mode(): boolean
@@ -1148,6 +1138,7 @@ end
 function ESP.start()
 	config.enabled = true
 	frame_count = 0
+	print("[ESP] Started")
 end
 
 function ESP.stop()
@@ -1160,6 +1151,7 @@ function ESP.stop()
 	sorted_count = 0
 	render_data_size = 0
 	is_static_mode_active = false
+	print("[ESP] Stopped")
 end
 
 function ESP.get_tracked_count(): number
