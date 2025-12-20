@@ -486,14 +486,14 @@ local function get_object_health(obj: Instance): (number?, number?)
 end
 
 local function scan_path(path: Instance)
-	local success, children = pcall(function()
-		return path:GetChildren()
+	local success, descendants = pcall(function()
+		return path:GetDescendants()
 	end)
 	
 	if not success then return end
 	
-	for i = 1, #children do
-		local obj = children[i]
+	for i = 1, #descendants do
+		local obj = descendants[i]
 		
 		if should_track_object(obj) then
 			local obj_id = tostring(obj)
