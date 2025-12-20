@@ -611,7 +611,10 @@ RunService.PostModel:Connect(function()
 end)
 
 RunService.PostData:Connect(function()
-	if not config or not config.enabled then return end
+	if not config or not config.enabled then 
+		print("[DEBUG] PostData skipped - config check failed")
+		return 
+	end
 	
 	local prof_start = config.profiling and os_clock()
 	
@@ -620,7 +623,10 @@ RunService.PostData:Connect(function()
 		camera_position = camera and camera.Position
 	end)
 	
-	if not camera or not camera_position then return end
+	if not camera or not camera_position then 
+		print("[DEBUG] PostData skipped - no camera")
+		return 
+	end
 	
 	if is_static_mode_active or config.static_mode then
 		local chunks = get_nearby_chunks(camera_position)
@@ -628,9 +634,15 @@ RunService.PostData:Connect(function()
 		
 		table_clear(physics_data)
 		
+		print(string_format("[DEBUG] Static mode - checking %d chunks", #chunks))
+		
 		for i = 1, #chunks do
 			local chunk = spatial_grid[chunks[i]]
 			if chunk then
+				local chunk_count = 0
+				for _ in pairs(chunk) do chunk_count = chunk_count + 1 end
+				print(string_format("[DEBUG] Chunk %s has %d objects", chunks[i], chunk_count))
+				
 				for obj_id in pairs(chunk) do
 					objects_checked = objects_checked + 1
 					
@@ -696,14 +708,21 @@ RunService.PostData:Connect(function()
 						end)
 					end
 				end
+			else
+				print(string_format("[DEBUG] Chunk %s is empty", chunks[i]))
 			end
 		end
+		
+		print(string_format("[DEBUG] Static mode processed %d objects, %d in physics_data", objects_checked, 
+			(function() local c = 0 for _ in pairs(physics_data) do c = c + 1 end return c end)()
+		))
 		
 		if config.profiling then
 			profile_counters.active_chunks = #chunks
 			profile_counters.objects_in_chunks = objects_checked
 		end
 	else
+		-- Normal mode unchanged...
 		for obj_id, data in pairs(tracked_objects) do
 			pcall(function()
 				local obj = data.object
@@ -784,11 +803,14 @@ RunService.PostData:Connect(function()
 		return a.distance < b.distance
 	end)
 	
+	print(string_format("[DEBUG] PostData finished - sorted_count: %d", sorted_count))
+	
 	if config.profiling then
 		profile_counters.tracked_objects = sorted_count
 		profile_event_times.data = os_clock() - prof_start
 	end
 end)
+
 
 RunService.PostLocal:Connect(function()
 	if not config or not config.enabled or not camera then return end
