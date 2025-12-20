@@ -619,17 +619,30 @@ local function connect_events()
 	end)
 	
 	RunService.PostData:Connect(function()
-		if not config.enabled then return end
-		
-		local prof_start = config.profiling and os_clock()
-		
-		pcall(function()
-			camera = workspace.CurrentCamera
-			camera_position = camera and camera.Position
-		end)
-		
-		if not camera or not camera_position then return end
-		
+		print(string_format("[DEBUG PostData] Frame %d - enabled: %s", frame_count, tostring(config.enabled)))
+	
+	if not config.enabled then 
+		print("[DEBUG PostData] Returning - not enabled")
+		return 
+	end
+	
+	local prof_start = config.profiling and os_clock()
+	
+	pcall(function()
+		camera = workspace.CurrentCamera
+		camera_position = camera and camera.Position
+	end)
+	
+	if not camera or not camera_position then 
+		print("[DEBUG PostData] Returning - no camera")
+		return 
+	end
+	
+	print(string_format("[DEBUG PostData] Processing - tracked: %d, static_mode: %s", 
+		(function() local c = 0 for _ in pairs(tracked_objects) do c = c + 1 end return c end)(),
+		tostring(is_static_mode_active)
+	))
+
 		if is_static_mode_active or config.static_mode then
 			local chunks = get_nearby_chunks(camera_position)
 			local objects_checked = 0
