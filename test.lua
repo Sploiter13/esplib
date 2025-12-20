@@ -583,6 +583,8 @@ end
 
 ---- runtime ----
 RunService.PostModel:Connect(function()
+			print("[DEBUG] PostModel triggered - frame:", frame_count)
+
 	if not config or not config.enabled then return end
 	
 	local prof_start = config.profiling and os_clock()
@@ -611,6 +613,8 @@ RunService.PostModel:Connect(function()
 end)
 
 RunService.PostData:Connect(function()
+			print("[DEBUG] PostData triggered - frame:", frame_count)
+
 	if not config or not config.enabled then 
 		print("[DEBUG] PostData skipped - config check failed")
 		return 
