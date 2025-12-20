@@ -18,7 +18,7 @@ local RunService = game:GetService("RunService")
 
 ---- constants ----
 local DEFAULT_CONFIG = {
-	enabled = true,
+	enabled = false,
 	profiling = false,
 	static_mode = false,
 	auto_static_mode = true,
@@ -87,7 +87,7 @@ local screen_center = nil
 local local_player = nil
 local local_character = nil
 
-local config = deep_copy or function(t) return t end
+local config = deep_copy(DEFAULT_CONFIG)
 local frame_count = 0
 local fade_range_inv = 1
 
@@ -98,6 +98,8 @@ local spatial_grid = {}
 local static_positions = {}
 local current_chunks = table_create(9)
 local is_static_mode_active = false
+
+local events_connected = false
 
 ---- profiling ----
 local profile_event_times = {
@@ -581,456 +583,430 @@ local function check_and_toggle_static_mode()
 	end
 end
 
----- runtime ----
-RunService.PostModel:Connect(function()
-			print("[DEBUG] PostModel triggered - frame:", frame_count)
-
-	if not config or not config.enabled then return end
+---- runtime - CONNECT EVENTS FUNCTION ----
+local function connect_events()
+	if events_connected then return end
+	events_connected = true
 	
-	local prof_start = config.profiling and os_clock()
+	print("[ESP] Connecting events...")
 	
-	frame_count = frame_count + 1
-	
-	update_local_player()
-	
-	if frame_count % SCAN_INTERVAL == 0 then
-		for i = 1, #active_paths do
-			pcall(function()
-				local path = active_paths[i]
-				if path and path.Parent then
-					scan_path(path)
-				end
-			end)
-		end
+	RunService.PostModel:Connect(function()
+		if not config.enabled then return end
 		
-		cleanup_stale_objects()
-		check_and_toggle_static_mode()
-	end
-	
-	if config.profiling then
-		profile_event_times.model = os_clock() - prof_start
-	end
-end)
-
-RunService.PostData:Connect(function()
-			print("[DEBUG] PostData triggered - frame:", frame_count)
-
-	if not config or not config.enabled then 
-		print("[DEBUG] PostData skipped - config check failed")
-		return 
-	end
-	
-	local prof_start = config.profiling and os_clock()
-	
-	pcall(function()
-		camera = workspace.CurrentCamera
-		camera_position = camera and camera.Position
-	end)
-	
-	if not camera or not camera_position then 
-		print("[DEBUG] PostData skipped - no camera")
-		return 
-	end
-	
-	if is_static_mode_active or config.static_mode then
-		local chunks = get_nearby_chunks(camera_position)
-		local objects_checked = 0
+		local prof_start = config.profiling and os_clock()
 		
-		table_clear(physics_data)
+		frame_count = frame_count + 1
 		
-		print(string_format("[DEBUG] Static mode - checking %d chunks", #chunks))
+		update_local_player()
 		
-		for i = 1, #chunks do
-			local chunk = spatial_grid[chunks[i]]
-			if chunk then
-				local chunk_count = 0
-				for _ in pairs(chunk) do chunk_count = chunk_count + 1 end
-				print(string_format("[DEBUG] Chunk %s has %d objects", chunks[i], chunk_count))
-				
-				for obj_id in pairs(chunk) do
-					objects_checked = objects_checked + 1
-					
-					local data = tracked_objects[obj_id]
-					local static_data = static_positions[obj_id]
-					
-					if data and static_data then
-						pcall(function()
-							local pos = static_data.position
-							
-							if frame_count - static_data.last_update > STATIC_POSITION_UPDATE_INTERVAL then
-								local obj = data.object
-								if obj and obj.Parent then
-									local new_pos = get_object_position(obj)
-									if new_pos then
-										remove_from_spatial_grid(obj_id)
-										add_to_spatial_grid(obj_id, new_pos)
-										pos = new_pos
-									end
-								end
-							end
-							
-							local dx = pos.X - camera_position.X
-							local dy = pos.Y - camera_position.Y
-							local dz = pos.Z - camera_position.Z
-							local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
-							
-							if distance <= config.max_distance then
-								physics_data[obj_id] = {
-									name = data.name,
-									position = pos,
-									distance = distance,
-								}
-								
-								if config.box_esp then
-									local obj = data.object
-									if obj and obj.Parent then
-										if not static_data.corners or (frame_count - static_data.last_update) > STATIC_POSITION_UPDATE_INTERVAL then
-											local parts = get_all_parts(obj)
-											local min_bound, max_bound = calculate_bounding_box(parts)
-											
-											if min_bound and max_bound then
-												local corners = calculate_bounding_corners(min_bound, max_bound)
-												static_data.corners = table_create(8)
-												for j = 1, 8 do
-													static_data.corners[j] = corners[j]
-												end
-												physics_data[obj_id].corners = static_data.corners
-											end
-										else
-											physics_data[obj_id].corners = static_data.corners
-										end
-									end
-								end
-								
-								if config.health_bar then
-									local obj = data.object
-									if obj and obj.Parent then
-										physics_data[obj_id].health, physics_data[obj_id].max_health = get_object_health(obj)
-									end
-								end
-							end
-						end)
-					end
-				end
-			else
-				print(string_format("[DEBUG] Chunk %s is empty", chunks[i]))
-			end
-		end
-		
-		print(string_format("[DEBUG] Static mode processed %d objects, %d in physics_data", objects_checked, 
-			(function() local c = 0 for _ in pairs(physics_data) do c = c + 1 end return c end)()
-		))
-		
-		if config.profiling then
-			profile_counters.active_chunks = #chunks
-			profile_counters.objects_in_chunks = objects_checked
-		end
-	else
-		-- Normal mode unchanged...
-		for obj_id, data in pairs(tracked_objects) do
-			pcall(function()
-				local obj = data.object
-				if not obj or not obj.Parent or should_exclude_object(obj) then return end
-				
-				local pos = get_object_position(obj)
-				if not pos then return end
-				
-				local dx = pos.X - camera_position.X
-				local dy = pos.Y - camera_position.Y
-				local dz = pos.Z - camera_position.Z
-				local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
-				
-				if distance > config.max_distance then return end
-				
-				if not physics_data[obj_id] then
-					physics_data[obj_id] = {}
-				end
-				
-				local phys = physics_data[obj_id]
-				phys.name = data.name
-				phys.position = pos
-				phys.distance = distance
-				
-				if config.health_bar then
-					phys.health, phys.max_health = get_object_health(obj)
-				end
-			end)
-		end
-		
-		if frame_count % 5 == 0 then
-			table_clear(update_queue)
-			local idx = 0
-			for obj_id in pairs(tracked_objects) do
-				idx = idx + 1
-				update_queue[idx] = obj_id
-			end
-			queue_index = 1
-		end
-		
-		local processed = 0
-		while processed < OBJECTS_PER_FRAME and queue_index <= #update_queue do
-			local obj_id = update_queue[queue_index]
-			queue_index = queue_index + 1
-			
-			local data = tracked_objects[obj_id]
-			local phys = physics_data[obj_id]
-			
-			if data and phys and config.box_esp then
+		if frame_count % SCAN_INTERVAL == 0 then
+			for i = 1, #active_paths do
 				pcall(function()
-					local obj = data.object
-					if not obj or not obj.Parent then return end
-					
-					local parts = get_all_parts(obj)
-					local min_bound, max_bound = calculate_bounding_box(parts)
-					
-					if min_bound and max_bound then
-						phys.corners = calculate_bounding_corners(min_bound, max_bound)
+					local path = active_paths[i]
+					if path and path.Parent then
+						scan_path(path)
 					end
 				end)
 			end
 			
-			processed = processed + 1
+			cleanup_stale_objects()
+			check_and_toggle_static_mode()
 		end
-	end
-	
-	table_clear(sorted_physics)
-	sorted_count = 0
-	
-	for obj_id, phys in pairs(physics_data) do
-		if phys.position then
-			sorted_count = sorted_count + 1
-			sorted_physics[sorted_count] = phys
+		
+		if config.profiling then
+			profile_event_times.model = os_clock() - prof_start
 		end
-	end
-	
-	table.sort(sorted_physics, function(a, b)
-		return a.distance < b.distance
 	end)
 	
-	print(string_format("[DEBUG] PostData finished - sorted_count: %d", sorted_count))
-	
-	if config.profiling then
-		profile_counters.tracked_objects = sorted_count
-		profile_event_times.data = os_clock() - prof_start
-	end
-end)
-
-
-RunService.PostLocal:Connect(function()
-	if not config or not config.enabled or not camera then return end
-	
-	local prof_start = config.profiling and os_clock()
-	
-	pcall(function()
-		viewport_size = camera.ViewportSize
-		screen_center = vector_create(viewport_size.X * 0.5, viewport_size.Y * 0.5, 0)
-	end)
-	
-	if not viewport_size then return end
-	
-	render_data_size = 0
-	local max_render = math_min(sorted_count, config.max_render_objects)
-	
-	for i = 1, max_render do
-		local phys = sorted_physics[i]
-		if not phys then break end
+	RunService.PostData:Connect(function()
+		if not config.enabled then return end
+		
+		local prof_start = config.profiling and os_clock()
 		
 		pcall(function()
-			local screen, visible = camera:WorldToScreenPoint(phys.position)
-			if not visible then return end
+			camera = workspace.CurrentCamera
+			camera_position = camera and camera.Position
+		end)
+		
+		if not camera or not camera_position then return end
+		
+		if is_static_mode_active or config.static_mode then
+			local chunks = get_nearby_chunks(camera_position)
+			local objects_checked = 0
 			
-			local fade_opacity = calculate_fade_opacity(phys.distance)
-			if fade_opacity <= 0 then return end
+			table_clear(physics_data)
 			
-			render_data_size = render_data_size + 1
-			
-			if not render_data[render_data_size] then
-				render_data[render_data_size] = {
-					last_distance = -1,
-					cached_text = "",
-				}
+			for i = 1, #chunks do
+				local chunk = spatial_grid[chunks[i]]
+				if chunk then
+					for obj_id in pairs(chunk) do
+						objects_checked = objects_checked + 1
+						
+						local data = tracked_objects[obj_id]
+						local static_data = static_positions[obj_id]
+						
+						if data and static_data then
+							pcall(function()
+								local pos = static_data.position
+								
+								if frame_count - static_data.last_update > STATIC_POSITION_UPDATE_INTERVAL then
+									local obj = data.object
+									if obj and obj.Parent then
+										local new_pos = get_object_position(obj)
+										if new_pos then
+											remove_from_spatial_grid(obj_id)
+											add_to_spatial_grid(obj_id, new_pos)
+											pos = new_pos
+										end
+									end
+								end
+								
+								local dx = pos.X - camera_position.X
+								local dy = pos.Y - camera_position.Y
+								local dz = pos.Z - camera_position.Z
+								local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
+								
+								if distance <= config.max_distance then
+									physics_data[obj_id] = {
+										name = data.name,
+										position = pos,
+										distance = distance,
+									}
+									
+									if config.box_esp then
+										local obj = data.object
+										if obj and obj.Parent then
+											if not static_data.corners or (frame_count - static_data.last_update) > STATIC_POSITION_UPDATE_INTERVAL then
+												local parts = get_all_parts(obj)
+												local min_bound, max_bound = calculate_bounding_box(parts)
+												
+												if min_bound and max_bound then
+													local corners = calculate_bounding_corners(min_bound, max_bound)
+													static_data.corners = table_create(8)
+													for j = 1, 8 do
+														static_data.corners[j] = corners[j]
+													end
+													physics_data[obj_id].corners = static_data.corners
+												end
+											else
+												physics_data[obj_id].corners = static_data.corners
+											end
+										end
+									end
+									
+									if config.health_bar then
+										local obj = data.object
+										if obj and obj.Parent then
+											physics_data[obj_id].health, physics_data[obj_id].max_health = get_object_health(obj)
+										end
+									end
+								end
+							end)
+						end
+					end
+				end
 			end
 			
-			local rd = render_data[render_data_size]
-			local screen_x, screen_y = screen.X, screen.Y
-			local distance = phys.distance
+			if config.profiling then
+				profile_counters.active_chunks = #chunks
+				profile_counters.objects_in_chunks = objects_checked
+			end
+		else
+			for obj_id, data in pairs(tracked_objects) do
+				pcall(function()
+					local obj = data.object
+					if not obj or not obj.Parent or should_exclude_object(obj) then return end
+					
+					local pos = get_object_position(obj)
+					if not pos then return end
+					
+					local dx = pos.X - camera_position.X
+					local dy = pos.Y - camera_position.Y
+					local dz = pos.Z - camera_position.Z
+					local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
+					
+					if distance > config.max_distance then return end
+					
+					if not physics_data[obj_id] then
+						physics_data[obj_id] = {}
+					end
+					
+					local phys = physics_data[obj_id]
+					phys.name = data.name
+					phys.position = pos
+					phys.distance = distance
+					
+					if config.health_bar then
+						phys.health, phys.max_health = get_object_health(obj)
+					end
+				end)
+			end
 			
-			rd.screen_pos = vector_create(screen_x, screen_y, 0)
-			rd.fade_opacity = fade_opacity
-			rd.distance = distance
+			if frame_count % 5 == 0 then
+				table_clear(update_queue)
+				local idx = 0
+				for obj_id in pairs(tracked_objects) do
+					idx = idx + 1
+					update_queue[idx] = obj_id
+				end
+				queue_index = 1
+			end
 			
-			local is_close = distance < LOD_DISTANCE_CLOSE
-			local is_medium = distance < LOD_DISTANCE_MEDIUM
+			local processed = 0
+			while processed < OBJECTS_PER_FRAME and queue_index <= #update_queue do
+				local obj_id = update_queue[queue_index]
+				queue_index = queue_index + 1
+				
+				local data = tracked_objects[obj_id]
+				local phys = physics_data[obj_id]
+				
+				if data and phys and config.box_esp then
+					pcall(function()
+						local obj = data.object
+						if not obj or not obj.Parent then return end
+						
+						local parts = get_all_parts(obj)
+						local min_bound, max_bound = calculate_bounding_box(parts)
+						
+						if min_bound and max_bound then
+							phys.corners = calculate_bounding_corners(min_bound, max_bound)
+						end
+					end)
+				end
+				
+				processed = processed + 1
+			end
+		end
+		
+		table_clear(sorted_physics)
+		sorted_count = 0
+		
+		for obj_id, phys in pairs(physics_data) do
+			if phys.position then
+				sorted_count = sorted_count + 1
+				sorted_physics[sorted_count] = phys
+			end
+		end
+		
+		table.sort(sorted_physics, function(a, b)
+			return a.distance < b.distance
+		end)
+		
+		if config.profiling then
+			profile_counters.tracked_objects = sorted_count
+			profile_event_times.data = os_clock() - prof_start
+		end
+	end)
+	
+	RunService.PostLocal:Connect(function()
+		if not config.enabled or not camera then return end
+		
+		local prof_start = config.profiling and os_clock()
+		
+		pcall(function()
+			viewport_size = camera.ViewportSize
+			screen_center = vector_create(viewport_size.X * 0.5, viewport_size.Y * 0.5, 0)
+		end)
+		
+		if not viewport_size then return end
+		
+		render_data_size = 0
+		local max_render = math_min(sorted_count, config.max_render_objects)
+		
+		for i = 1, max_render do
+			local phys = sorted_physics[i]
+			if not phys then break end
 			
-			if config.box_esp and phys.corners then
-				local box_min, box_max = project_corners_to_screen(phys.corners, camera)
-				if box_min and box_max then
-					rd.box_min = box_min
-					rd.box_size = box_max - box_min
+			pcall(function()
+				local screen, visible = camera:WorldToScreenPoint(phys.position)
+				if not visible then return end
+				
+				local fade_opacity = calculate_fade_opacity(phys.distance)
+				if fade_opacity <= 0 then return end
+				
+				render_data_size = render_data_size + 1
+				
+				if not render_data[render_data_size] then
+					render_data[render_data_size] = {
+						last_distance = -1,
+						cached_text = "",
+					}
+				end
+				
+				local rd = render_data[render_data_size]
+				local screen_x, screen_y = screen.X, screen.Y
+				local distance = phys.distance
+				
+				rd.screen_pos = vector_create(screen_x, screen_y, 0)
+				rd.fade_opacity = fade_opacity
+				rd.distance = distance
+				
+				local is_close = distance < LOD_DISTANCE_CLOSE
+				local is_medium = distance < LOD_DISTANCE_MEDIUM
+				
+				if config.box_esp and phys.corners then
+					local box_min, box_max = project_corners_to_screen(phys.corners, camera)
+					if box_min and box_max then
+						rd.box_min = box_min
+						rd.box_size = box_max - box_min
+					else
+						rd.box_min = nil
+					end
 				else
 					rd.box_min = nil
 				end
-			else
-				rd.box_min = nil
-			end
-			
-			local y_offset = 0
-			if config.name_esp then
-				local dist_floored = math_floor(distance)
 				
-				if dist_floored ~= rd.last_distance then
-					rd.last_distance = dist_floored
-					if config.distance_esp and is_medium then
-						rd.cached_text = phys.name .. " [" .. dist_floored .. "m]"
-					else
-						rd.cached_text = phys.name
+				local y_offset = 0
+				if config.name_esp then
+					local dist_floored = math_floor(distance)
+					
+					if dist_floored ~= rd.last_distance then
+						rd.last_distance = dist_floored
+						if config.distance_esp and is_medium then
+							rd.cached_text = phys.name .. " [" .. dist_floored .. "m]"
+						else
+							rd.cached_text = phys.name
+						end
 					end
+					
+					rd.name_text = rd.cached_text
+					rd.name_pos = vector_create(screen_x, screen_y - y_offset, 0)
+					y_offset = y_offset + config.font_size + 2
+				else
+					rd.name_text = nil
 				end
 				
-				rd.name_text = rd.cached_text
-				rd.name_pos = vector_create(screen_x, screen_y - y_offset, 0)
-				y_offset = y_offset + config.font_size + 2
-			else
-				rd.name_text = nil
-			end
-			
-			if config.health_bar and is_medium and phys.health and phys.max_health and phys.max_health > 0 then
-				local bar_width = is_close and 100 or 60
-				local bar_height = 4
-				local health_percent = phys.health / phys.max_health
+				if config.health_bar and is_medium and phys.health and phys.max_health and phys.max_health > 0 then
+					local bar_width = is_close and 100 or 60
+					local bar_height = 4
+					local health_percent = phys.health / phys.max_health
+					
+					rd.bar_enabled = true
+					rd.bar_pos = vector_create(screen_x - bar_width * 0.5, screen_y - y_offset, 0)
+					rd.bar_bg_size = vector_create(bar_width, bar_height, 0)
+					rd.bar_fill_size = vector_create(bar_width * health_percent, bar_height, 0)
+					rd.bar_opacity_bg = is_close and 0.8 or 0.6
+					rd.bar_opacity_fill = is_close and 0.9 or 0.7
+				else
+					rd.bar_enabled = false
+				end
 				
-				rd.bar_enabled = true
-				rd.bar_pos = vector_create(screen_x - bar_width * 0.5, screen_y - y_offset, 0)
-				rd.bar_bg_size = vector_create(bar_width, bar_height, 0)
-				rd.bar_fill_size = vector_create(bar_width * health_percent, bar_height, 0)
-				rd.bar_opacity_bg = is_close and 0.8 or 0.6
-				rd.bar_opacity_fill = is_close and 0.9 or 0.7
-			else
-				rd.bar_enabled = false
+				rd.draw_tracer = config.tracers and is_medium
+			end)
+		end
+		
+		if config.profiling then
+			profile_counters.rendered_objects = render_data_size
+			profile_event_times.local_calc = os_clock() - prof_start
+		end
+	end)
+	
+	RunService.Render:Connect(function()
+		if not config.enabled or not viewport_size or not screen_center then return end
+		
+		local prof_start = config.profiling and os_clock()
+		
+		for i = 1, render_data_size do
+			local data = render_data[i]
+			if not data then break end
+			
+			local fade = data.fade_opacity
+			
+			if config.box_esp and data.box_min then
+				DrawingImmediate.Rectangle(
+					data.box_min,
+					data.box_size,
+					config.box_color,
+					config.box_opacity * fade,
+					config.box_thickness
+				)
 			end
 			
-			rd.draw_tracer = config.tracers and is_medium
-		end)
-	end
-	
-	if config.profiling then
-		profile_counters.rendered_objects = render_data_size
-		profile_event_times.local_calc = os_clock() - prof_start
-	end
-end)
-
-RunService.Render:Connect(function()
-	if not config or not config.enabled or not viewport_size or not screen_center then return end
-	
-	local prof_start = config.profiling and os_clock()
-	
-	-- DEBUG: Print every 60 frames
-	if frame_count % 60 == 0 and config.profiling then
-		print(string_format("[DEBUG] Render data size: %d, Sorted count: %d, Physics data count: %d", 
-			render_data_size, sorted_count, 
-			(function() local c = 0 for _ in pairs(physics_data) do c = c + 1 end return c end)()
-		))
-	end
-	
-	for i = 1, render_data_size do
-		local data = render_data[i]
-		if not data then break end
-		
-		local fade = data.fade_opacity
-		
-		if config.box_esp and data.box_min then
-			DrawingImmediate.Rectangle(
-				data.box_min,
-				data.box_size,
-				config.box_color,
-				config.box_opacity * fade,
-				config.box_thickness
-			)
-		end
-		
-		if config.name_esp and data.name_text then
-			DrawingImmediate.OutlinedText(
-				data.name_pos,
-				config.font_size,
-				config.name_color,
-				config.name_opacity * fade,
-				data.name_text,
-				true,
-				config.font
-			)
-		end
-		
-		if data.bar_enabled then
-			DrawingImmediate.FilledRectangle(
-				data.bar_pos,
-				data.bar_bg_size,
-				Color3.new(0.2, 0.2, 0.2),
-				data.bar_opacity_bg * fade
-			)
-			
-			DrawingImmediate.FilledRectangle(
-				data.bar_pos,
-				data.bar_fill_size,
-				config.health_bar_color,
-				data.bar_opacity_fill * fade
-			)
-		end
-		
-		if data.draw_tracer then
-			DrawingImmediate.Line(
-				screen_center,
-				data.screen_pos,
-				config.tracer_color,
-				config.tracer_opacity * fade,
-				1,
-				config.tracer_thickness
-			)
-		end
-	end
-	
-	if config.profiling then
-		profile_event_times.render = os_clock() - prof_start
-		
-		if frame_count % 60 == 0 then
-			print(string_format("\n==== ESP Performance Report ===="))
-			print(string_format("Mode: %s", is_static_mode_active and "STATIC" or "NORMAL"))
-			
-			print(string_format("\nEvents:"))
-			print(string_format("  Model:  %.4fms", profile_event_times.model * 1000))
-			print(string_format("  Data:   %.4fms", profile_event_times.data * 1000))
-			print(string_format("  Local:  %.4fms", profile_event_times.local_calc * 1000))
-			print(string_format("  Render: %.4fms", profile_event_times.render * 1000))
-			
-			print(string_format("\nFunctions:"))
-			print(string_format("  GetPosition:    %.4fms", profile_function_times.get_position * 1000))
-			print(string_format("  GetDescendants: %.4fms", profile_function_times.get_descendants * 1000))
-			print(string_format("  CalcBBox:       %.4fms", profile_function_times.calc_bbox * 1000))
-			print(string_format("  CalcCorners:    %.4fms", profile_function_times.calc_corners * 1000))
-			print(string_format("  ProjectScreen:  %.4fms", profile_function_times.project_screen * 1000))
-			print(string_format("  GetHealth:      %.4fms", profile_function_times.get_health * 1000))
-			
-			print(string_format("\nStats:"))
-			print(string_format("  Tracked:  %d", profile_counters.tracked_objects))
-			print(string_format("  Rendered: %d", profile_counters.rendered_objects))
-			
-			if is_static_mode_active then
-				print(string_format("  Active Chunks: %d", profile_counters.active_chunks))
-				print(string_format("  Objects in Chunks: %d", profile_counters.objects_in_chunks))
+			if config.name_esp and data.name_text then
+				DrawingImmediate.OutlinedText(
+					data.name_pos,
+					config.font_size,
+					config.name_color,
+					config.name_opacity * fade,
+					data.name_text,
+					true,
+					config.font
+				)
 			end
 			
-			print(string_format("  Cache Hits:   %d", profile_counters.cache_hits))
-			print(string_format("  Cache Misses: %d", profile_counters.cache_misses))
-			print(string_format("================================\n"))
-			
-			for k in pairs(profile_function_times) do
-				profile_function_times[k] = 0
+			if data.bar_enabled then
+				DrawingImmediate.FilledRectangle(
+					data.bar_pos,
+					data.bar_bg_size,
+					Color3.new(0.2, 0.2, 0.2),
+					data.bar_opacity_bg * fade
+				)
+				
+				DrawingImmediate.FilledRectangle(
+					data.bar_pos,
+					data.bar_fill_size,
+					config.health_bar_color,
+					data.bar_opacity_fill * fade
+				)
 			end
-			profile_counters.cache_hits = 0
-			profile_counters.cache_misses = 0
+			
+			if data.draw_tracer then
+				DrawingImmediate.Line(
+					screen_center,
+					data.screen_pos,
+					config.tracer_color,
+					config.tracer_opacity * fade,
+					1,
+					config.tracer_thickness
+				)
+			end
 		end
-	end
-end)
-
+		
+		if config.profiling then
+			profile_event_times.render = os_clock() - prof_start
+			
+			if frame_count % 60 == 0 then
+				print(string_format("\n==== ESP Performance Report ===="))
+				print(string_format("Mode: %s", is_static_mode_active and "STATIC" or "NORMAL"))
+				
+				print(string_format("\nEvents:"))
+				print(string_format("  Model:  %.4fms", profile_event_times.model * 1000))
+				print(string_format("  Data:   %.4fms", profile_event_times.data * 1000))
+				print(string_format("  Local:  %.4fms", profile_event_times.local_calc * 1000))
+				print(string_format("  Render: %.4fms", profile_event_times.render * 1000))
+				
+				print(string_format("\nFunctions:"))
+				print(string_format("  GetPosition:    %.4fms", profile_function_times.get_position * 1000))
+				print(string_format("  GetDescendants: %.4fms", profile_function_times.get_descendants * 1000))
+				print(string_format("  CalcBBox:       %.4fms", profile_function_times.calc_bbox * 1000))
+				print(string_format("  CalcCorners:    %.4fms", profile_function_times.calc_corners * 1000))
+				print(string_format("  ProjectScreen:  %.4fms", profile_function_times.project_screen * 1000))
+				print(string_format("  GetHealth:      %.4fms", profile_function_times.get_health * 1000))
+				
+				print(string_format("\nStats:"))
+				print(string_format("  Tracked:  %d", profile_counters.tracked_objects))
+				print(string_format("  Rendered: %d", profile_counters.rendered_objects))
+				
+				if is_static_mode_active then
+					print(string_format("  Active Chunks: %d", profile_counters.active_chunks))
+					print(string_format("  Objects in Chunks: %d", profile_counters.objects_in_chunks))
+				end
+				
+				print(string_format("  Cache Hits:   %d", profile_counters.cache_hits))
+				print(string_format("  Cache Misses: %d", profile_counters.cache_misses))
+				print(string_format("================================\n"))
+				
+				for k in pairs(profile_function_times) do
+					profile_function_times[k] = 0
+				end
+				profile_counters.cache_hits = 0
+				profile_counters.cache_misses = 0
+			end
+		end
+	end)
+	
+	print("[ESP] Events connected successfully")
+end
 
 ---- module ----
 local ESP = {}
@@ -1054,6 +1030,8 @@ function ESP.new(settings: {[string]: any}?): typeof(ESP)
 	end
 	
 	update_local_player()
+	
+	connect_events()
 	
 	print(string_format("[ESP] Initialized - Profiling: %s", config.profiling and "ENABLED" or "DISABLED"))
 	
