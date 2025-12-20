@@ -2,118 +2,121 @@
 --!optimize 2
 
 ---- environment ----
-local assert, typeof, tonumber = assert, typeof, tonumber
-local pcall, pairs, ipairs = pcall, pairs, ipairs
-local task_wait, task_spawn = task.wait, task.spawn
-local table_find, table_insert, table_remove = table.find, table.insert, table.remove
-local string_format, string_lower = string.format, string.lower
+local assert, typeof = assert, typeof
+local pcall, pairs = pcall, pairs
+local table_insert, table_remove, table_create, table_clear = table.insert, table.remove, table.create, table.clear
+local string_format, string_lower, string_split = string.format, string.lower, string.split
 local math_floor, math_sqrt, math_min, math_max = math.floor, math.sqrt, math.min, math.max
 local math_huge = math.huge
-local vector_magnitude, vector_create = vector.magnitude, vector.create
+local vector_create = vector.create
+local os_clock = os.clock
+local task_spawn = task.spawn
+local task_wait = task.wait
 
 local game = game
 local workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
+local function deep_copy(tbl: {[any]: any}): {[any]: any}
+	local copy = table_create(10)
+	for k, v in pairs(tbl) do
+		copy[k] = typeof(v) == "table" and deep_copy(v) or v
+	end
+	return copy
+end
+
 ---- constants ----
 local DEFAULT_CONFIG = {
-	enabled = true,
+	enabled = false,
+	profiling = false,
+	
 	name_esp = true,
 	distance_esp = true,
 	box_esp = true,
 	health_bar = false,
 	tracers = false,
 	
-	-- Filtering
 	exclude_players = false,
 	auto_exclude_localplayer = true,
 	
-	-- Colors
 	name_color = Color3.new(1, 1, 1),
 	box_color = Color3.new(1, 0, 0),
 	tracer_color = Color3.new(0, 1, 0),
 	health_bar_color = Color3.new(0, 1, 0),
 	
-	-- Settings
 	max_distance = 1000,
+	max_render_objects = 100,
 	font_size = 14,
 	font = "Tamzen",
 	box_thickness = 2,
 	tracer_thickness = 1,
 	
-	-- Transparency
 	name_opacity = 1,
 	box_opacity = 0.8,
 	tracer_opacity = 0.6,
 	
-	-- Distance fade
 	fade_enabled = true,
 	fade_start = 500,
 	fade_end = 1000,
 }
 
+local PART_NAMES = {"HumanoidRootPart", "Head", "UpperTorso", "Torso"}
+local SCAN_INTERVAL = 1
+local BOX_CACHE_TIME = 5
+local BOX_DISTANCE_LIMIT = 300
+local LOD_DISTANCE_CLOSE = 200
+local LOD_DISTANCE_MEDIUM = 500
+
 ---- variables ----
 local tracked_objects = {}
-local render_data = {}
-local active_paths = {}
+local box_cache = {}
+local render_data = table_create(100)
+
+local active_paths = table_create(10)
 local include_filter = nil
-local exclude_filter = {}
+local exclude_filter = table_create(10)
+
 local camera = nil
 local camera_position = nil
 local viewport_size = nil
-local render_connection = nil
-local update_connection = nil
-local config = {}
+local screen_center = nil
+
 local local_player = nil
 local local_character = nil
+
+local config = {}
 local frame_count = 0
+local fade_range_inv = 1
+
+local running = false
+
+---- profiling ----
+local profile_times = {
+	scan = 0,
+	render = 0,
+}
+
+local profile_counters = {
+	tracked = 0,
+	rendered = 0,
+}
 
 ---- functions ----
-local function deep_copy(tbl: {[any]: any}): {[any]: any}
-	local copy = {}
-	for k, v in pairs(tbl) do
-		if typeof(v) == "table" then
-			copy[k] = deep_copy(v)
-		else
-			copy[k] = v
-		end
-	end
-	return copy
-end
-
-local function calculate_distance(pos1: vector, pos2: vector): number
-    return vector_magnitude(pos1 - pos2)
-end
-
 local function calculate_fade_opacity(distance: number): number
-	if not config.fade_enabled then
-		return 1
-	end
-	
-	if distance <= config.fade_start then
+	if not config.fade_enabled or distance <= config.fade_start then
 		return 1
 	elseif distance >= config.fade_end then
 		return 0
-	else
-		local range = config.fade_end - config.fade_start
-		local fade_distance = distance - config.fade_start
-		return 1 - (fade_distance / range)
 	end
+	return 1 - ((distance - config.fade_start) * fade_range_inv)
 end
 
 local function update_local_player()
-	local success = pcall(function()
+	pcall(function()
 		local_player = Players.LocalPlayer
-		if local_player then
-			local_character = local_player.Character
-		end
+		local_character = local_player and local_player.Character
 	end)
-	
-	if not success then
-		local_player = nil
-		local_character = nil
-	end
 end
 
 local function is_player_character(obj: Instance): boolean
@@ -121,8 +124,8 @@ local function is_player_character(obj: Instance): boolean
 		return false
 	end
 	
-	local success, is_player = pcall(function()
-		for _, player in ipairs(Players:GetChildren()) do
+	local success, result = pcall(function()
+		for _, player in pairs(Players:GetPlayers()) do
 			if player.Character == obj then
 				return true
 			end
@@ -130,11 +133,11 @@ local function is_player_character(obj: Instance): boolean
 		return false
 	end)
 	
-	return success and is_player
+	return success and result
 end
 
 local function should_exclude_object(obj: Instance): boolean
-	if config.auto_exclude_localplayer and local_character and obj == local_character then
+	if config.auto_exclude_localplayer and obj == local_character then
 		return true
 	end
 	
@@ -146,18 +149,22 @@ local function should_exclude_object(obj: Instance): boolean
 end
 
 local function should_track_object(obj: Instance): boolean
-	assert(typeof(obj) == "Instance", "invalid argument #1 (Instance expected)")
-	
 	if should_exclude_object(obj) then
 		return false
 	end
 	
-	local obj_name = obj.Name
+	local success, obj_name = pcall(function()
+		return string_lower(obj.Name)
+	end)
+	
+	if not success then
+		return false
+	end
 	
 	if include_filter then
 		local found = false
-		for _, name in ipairs(include_filter) do
-			if string_lower(obj_name):find(string_lower(name), 1, true) then
+		for i = 1, #include_filter do
+			if obj_name:find(string_lower(include_filter[i]), 1, true) then
 				found = true
 				break
 			end
@@ -167,8 +174,8 @@ local function should_track_object(obj: Instance): boolean
 		end
 	end
 	
-	for _, name in ipairs(exclude_filter) do
-		if string_lower(obj_name):find(string_lower(name), 1, true) then
+	for i = 1, #exclude_filter do
+		if obj_name:find(string_lower(exclude_filter[i]), 1, true) then
 			return false
 		end
 	end
@@ -176,434 +183,341 @@ local function should_track_object(obj: Instance): boolean
 	return true
 end
 
-local function get_all_parts(obj: Instance?): {Instance}
-    local parts = {}
-    
-    if not obj then
-        return parts
-    end
-    
-    if obj ~= workspace then
-        local ok = pcall(function()
-            return obj.Parent
-        end)
-        if not ok or not obj.Parent then
-            return parts
-        end
-    end
-    
-    local success = pcall(function()
-        if obj.ClassName:find("Part") then
-            table_insert(parts, obj)
-        elseif obj.ClassName == "Model" then
-            for _, child in ipairs(obj:GetDescendants()) do
-                if child and child.Parent and child.ClassName:find("Part") then
-                    table_insert(parts, child)
-                end
-            end
-        end
-    end)
-    
-    return parts
+local function get_object_position(obj: Instance): vector?
+	local success, result = pcall(function()
+		if not obj or not obj.Parent then return nil end
+		
+		if obj.ClassName == "Model" then
+			local primary = obj.PrimaryPart
+			if primary and primary.Parent then
+				return primary.Position
+			end
+			
+			for i = 1, #PART_NAMES do
+				local part = obj:FindFirstChild(PART_NAMES[i])
+				if part and part.Parent and part.ClassName:find("Part") then
+					return part.Position
+				end
+			end
+			
+			local children = obj:GetChildren()
+			for i = 1, #children do
+				local child = children[i]
+				if child.Parent and child.ClassName:find("Part") then
+					return child.Position
+				end
+			end
+		elseif obj.ClassName:find("Part") then
+			return obj.Position
+		end
+		
+		return nil
+	end)
+	
+	return success and result or nil
 end
 
-
-local function calculate_bounding_box(parts: {Instance}): (vector?, vector?)
-    if #parts == 0 then
-        return nil, nil
-    end
-    
-    local min_x, min_y, min_z = math_huge, math_huge, math_huge
-    local max_x, max_y, max_z = -math_huge, -math_huge, -math_huge
-    
-    for _, part in ipairs(parts) do
-        if part then
-            local ok = pcall(function()
-                return part.Parent
-            end)
-            
-            if ok and part.Parent then
-                local success = pcall(function()
-                    local pos = part.Position
-                    local size = part.Size
-                    local half_size_x = size.X / 2
-                    local half_size_y = size.Y / 2
-                    local half_size_z = size.Z / 2
-                    
-                    min_x = math_min(min_x, pos.X - half_size_x)
-                    min_y = math_min(min_y, pos.Y - half_size_y)
-                    min_z = math_min(min_z, pos.Z - half_size_z)
-                    max_x = math_max(max_x, pos.X + half_size_x)
-                    max_y = math_max(max_y, pos.Y + half_size_y)
-                    max_z = math_max(max_z, pos.Z + half_size_z)
-                end)
-            end
-        end
-    end
-    
-    if min_x == math_huge then
-        return nil, nil
-    end
-    
-    return vector_create(min_x, min_y, min_z), vector_create(max_x, max_y, max_z)
+local function get_simple_box_corners(obj: Instance): {vector}?
+	local success, corners = pcall(function()
+		if not obj or not obj.Parent then return nil end
+		
+		local pos, size
+		
+		if obj.ClassName == "Model" then
+			local primary = obj.PrimaryPart
+			if primary and primary.Parent then
+				pos = primary.Position
+				size = primary.Size
+			else
+				for i = 1, #PART_NAMES do
+					local part = obj:FindFirstChild(PART_NAMES[i])
+					if part and part.Parent and part.ClassName:find("Part") then
+						pos = part.Position
+						size = part.Size
+						break
+					end
+				end
+			end
+		elseif obj.ClassName:find("Part") then
+			pos = obj.Position
+			size = obj.Size
+		end
+		
+		if not pos or not size then return nil end
+		
+		local hsx, hsy, hsz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
+		local px, py, pz = pos.X, pos.Y, pos.Z
+		
+		return {
+			vector_create(px - hsx, py - hsy, pz - hsz),
+			vector_create(px + hsx, py - hsy, pz - hsz),
+			vector_create(px + hsx, py - hsy, pz + hsz),
+			vector_create(px - hsx, py - hsy, pz + hsz),
+			vector_create(px - hsx, py + hsy, pz - hsz),
+			vector_create(px + hsx, py + hsy, pz - hsz),
+			vector_create(px + hsx, py + hsy, pz + hsz),
+			vector_create(px - hsx, py + hsy, pz + hsz),
+		}
+	end)
+	
+	return success and corners or nil
 end
 
-local function get_bounding_box_corners(min_bound: vector, max_bound: vector): {vector}
-	return {
-		vector_create(min_bound.X, min_bound.Y, min_bound.Z),
-		vector_create(max_bound.X, min_bound.Y, min_bound.Z),
-		vector_create(max_bound.X, min_bound.Y, max_bound.Z),
-		vector_create(min_bound.X, min_bound.Y, max_bound.Z),
-		vector_create(min_bound.X, max_bound.Y, min_bound.Z),
-		vector_create(max_bound.X, max_bound.Y, min_bound.Z),
-		vector_create(max_bound.X, max_bound.Y, max_bound.Z),
-		vector_create(min_bound.X, max_bound.Y, max_bound.Z),
-	}
-end
-
-local function get_2d_bounding_box(corners_3d: {vector}, cam: Instance): (vector?, vector?)
+local function project_corners_to_screen(corners: {vector}, cam: Instance): (vector?, vector?)
 	local min_x, min_y = math_huge, math_huge
 	local max_x, max_y = -math_huge, -math_huge
 	local any_visible = false
 	
-	for _, corner in ipairs(corners_3d) do
-		local screen_pos, visible = cam:WorldToScreenPoint(corner)
-		if visible then
-			any_visible = true
-			min_x = math_min(min_x, screen_pos.X)
-			min_y = math_min(min_y, screen_pos.Y)
-			max_x = math_max(max_x, screen_pos.X)
-			max_y = math_max(max_y, screen_pos.Y)
+	pcall(function()
+		for i = 1, 8 do
+			local screen_pos, visible = cam:WorldToScreenPoint(corners[i])
+			if visible then
+				any_visible = true
+				local sx, sy = screen_pos.X, screen_pos.Y
+				min_x = math_min(min_x, sx)
+				min_y = math_min(min_y, sy)
+				max_x = math_max(max_x, sx)
+				max_y = math_max(max_y, sy)
+			end
 		end
-	end
+	end)
 	
-	if not any_visible or min_x == math_huge then
+	if not any_visible then
 		return nil, nil
 	end
 	
 	return vector_create(min_x, min_y, 0), vector_create(max_x, max_y, 0)
 end
 
-local function get_object_position(obj: Instance?): vector?
-    if not obj then
-        return nil
-    end
-    
-    if obj ~= workspace then
-        local ok = pcall(function()
-            return obj.Parent
-        end)
-        if not ok or not obj.Parent then
-            return nil
-        end
-    end
-    
-    local success, result = pcall(function()
-        if obj.ClassName == "Model" then
-            local primary = obj.PrimaryPart
-            if primary and primary.Parent then
-                return primary.Position
-            end
-            
-            local parts = {"HumanoidRootPart", "Head", "Torso", "UpperTorso"}
-            for _, part_name in ipairs(parts) do
-                local part = obj:FindFirstChild(part_name)
-                if part and part.Parent and part.ClassName:find("Part") then
-                    return part.Position
-                end
-            end
-            
-            for _, child in ipairs(obj:GetChildren()) do
-                if child and child.Parent and child.ClassName:find("Part") then
-                    return child.Position
-                end
-            end
-        elseif obj.ClassName:find("Part") then
-            return obj.Position
-        end
-        
-        return nil
-    end)
-    
-    if success and result then
-        return result
-    end
-    
-    return nil
-end
-
-
-local function get_object_health(obj: Instance?): (number?, number?)
-    if not obj then
-        return nil, nil
-    end
-    
-    if obj ~= workspace then
-        local ok = pcall(function()
-            return obj.Parent
-        end)
-        if not ok or not obj.Parent then
-            return nil, nil
-        end
-    end
-    
-    if obj.ClassName ~= "Model" then
-        return nil, nil
-    end
-    
-    local success, health, max_health = pcall(function()
-        local humanoid = obj:FindFirstChildOfClass("Humanoid")
-        if humanoid and humanoid.Parent then  
-            return humanoid.Health, humanoid.MaxHealth
-        end
-        return nil, nil
-    end)
-    
-    if success then
-        return health, max_health
-    end
-    
-    return nil, nil
-end
-
-
-local function scan_path(path: Instance)
-	assert(typeof(path) == "Instance", "invalid path (Instance expected)")
+local function scan_paths()
+	local prof_start = config.profiling and os_clock()
 	
-	local success, children = pcall(function()
-		return path:GetChildren()
-	end)
+	table_clear(tracked_objects)
 	
-	if not success then
-		warn(`failed to scan path: {path.Name}`)
-		return
-	end
-	
-	for _, obj in ipairs(children) do
-		if should_track_object(obj) then
-			local obj_id = obj.Data or tostring(obj)
+	for path_idx = 1, #active_paths do
+		pcall(function()
+			local path = active_paths[path_idx]
+			if not path or not path.Parent then return end
 			
-			if not tracked_objects[obj_id] then
-				local position = get_object_position(obj)
-				if position then
-					local parts = get_all_parts(obj)
-					local min_bound, max_bound = calculate_bounding_box(parts)
+			local children = path:GetChildren()
+			
+			for i = 1, #children do
+				local obj = children[i]
+				
+				if should_track_object(obj) then
+					local position = get_object_position(obj)
 					
-					tracked_objects[obj_id] = {
-						object = obj,
-						name = obj.Name,
-						position = position,
-						parts = parts,
-						min_bound = min_bound,
-						max_bound = max_bound,
-						last_seen = os.clock(),
-					}
+					if position then
+						local obj_name
+						pcall(function()
+							obj_name = obj.Name
+						end)
+						
+						local obj_id = tostring(obj)
+						tracked_objects[obj_id] = {
+							object = obj,
+							name = obj_name or "Unknown",
+							position = position,
+						}
+					end
 				end
-			else
-				tracked_objects[obj_id].last_seen = os.clock()
+			end
+		end)
+	end
+	
+	if config.profiling then
+		profile_times.scan = os_clock() - prof_start
+		profile_counters.tracked = 0
+		for _ in pairs(tracked_objects) do
+			profile_counters.tracked = profile_counters.tracked + 1
+		end
+	end
+end
+
+---- scan loop ----
+local function scan_loop()
+	while running do
+		if config.enabled then
+			scan_paths()
+		end
+		task_wait(SCAN_INTERVAL)
+	end
+end
+
+---- box cache update loop ----
+local function box_cache_loop()
+	while running do
+		if config.enabled and config.box_esp then
+			local current_time = os_clock()
+			
+			for obj_id, data in pairs(tracked_objects) do
+				local cache_entry = box_cache[obj_id]
+				
+				if not cache_entry or (current_time - cache_entry.time) > BOX_CACHE_TIME then
+					pcall(function()
+						local obj = data.object
+						if obj and obj.Parent then
+							local corners = get_simple_box_corners(obj)
+							if corners then
+								box_cache[obj_id] = {
+									corners = corners,
+									time = current_time,
+								}
+							end
+						end
+					end)
+				end
+				
+				task_wait(0.01)
 			end
 		end
+		task_wait(0.5)
 	end
 end
 
-local function cleanup_stale_objects()
-	local current_time = os.clock()
-	local stale_threshold = 2
-	
-	for obj_id, data in pairs(tracked_objects) do
-		if current_time - data.last_seen > stale_threshold then
-			tracked_objects[obj_id] = nil
-		elseif not data.object or not data.object.Parent then
-			tracked_objects[obj_id] = nil
-		end
-	end
-end
-
----- PostLocal - Scanning and ALL calculations happen here EVERY FRAME ----
----- PostLocal - Scanning and calculations ----
-local function update_loop()
-    if not config.enabled then
-        return
-    end
-    
-    frame_count += 1
-    
-    -- Update camera reference every frame
-    local success = pcall(function()
-        camera = workspace.CurrentCamera
-        if camera then
-            camera_position = camera.CFrame.Position  -- ✅ Fixed
-            viewport_size = camera.ViewportSize
-        end
-    end)
-    
-    if not success or not camera or not camera_position then
-        camera = nil
-        camera_position = nil
-        viewport_size = nil
-        return
-    end
-    
-    update_local_player()
-    
-    -- Scan paths every 30 frames (~0.5 seconds at 60fps)
-    if frame_count % 30 == 0 then
-        for _, path in ipairs(active_paths) do
-            if path and path.Parent then
-                scan_path(path)
-            end
-        end
-        cleanup_stale_objects()
-    end
-    
-    -- Calculate render data EVERY FRAME for smooth movement
-    local new_render_data = {}
-    
-    for obj_id, data in pairs(tracked_objects) do
-        local obj = data.object
-        if obj and obj.Parent then
-            if not should_exclude_object(obj) then
-                -- Update position every frame
-                local pos = get_object_position(obj)
-                if pos then
-                    data.position = pos
-                    
-                    -- ✅ Only recalculate bounding box every 3 frames
-                    if frame_count % 3 == 0 then
-                        local parts = get_all_parts(obj)
-                        data.parts = parts
-                        data.min_bound, data.max_bound = calculate_bounding_box(parts)
-                    end
-                    
-                    -- Calculate distance (using cached vector_magnitude)
-                    local distance = calculate_distance(pos, camera_position)
-                    
-                    if distance <= config.max_distance then
-                        -- World to screen
-                        local screen, visible = camera:WorldToScreenPoint(pos)
-                        
-                        if visible then
-                            local fade_opacity = calculate_fade_opacity(distance)
-                            
-                            if fade_opacity > 0 then
-                                -- Calculate bounding box in screen space
-                                local box_min, box_max = nil, nil
-                                if config.box_esp and data.min_bound and data.max_bound then
-                                    local corners = get_bounding_box_corners(data.min_bound, data.max_bound)
-                                    box_min, box_max = get_2d_bounding_box(corners, camera)
-                                end
-                                
-                                -- Get health
-                                local health, max_health = nil, nil
-                                if config.health_bar then
-                                    health, max_health = get_object_health(obj)
-                                end
-                                
-                                -- Store pre-computed render data
-                                table_insert(new_render_data, {
-                                    name = data.name,
-                                    screen_pos = vector_create(screen.X, screen.Y, 0),
-                                    distance = distance,
-                                    fade_opacity = fade_opacity,
-                                    box_min = box_min,
-                                    box_max = box_max,
-                                    health = health,
-                                    max_health = max_health,
-                                })
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-    
-    -- Swap render data
-    render_data = new_render_data
-end
-
----- Render - ONLY DRAWING ----
+---- render loop ----
 local function render_loop()
-	if not config.enabled or not viewport_size then
-		return
-	end
-	
-	local screen_center = vector_create(viewport_size.X / 2, viewport_size.Y / 2, 0)
-	
-	for _, data in ipairs(render_data) do
-		local screen_pos = data.screen_pos
-		local fade_opacity = data.fade_opacity
+	RunService.Render:Connect(function()
+		if not config.enabled then return end
 		
-		-- Bounding Box
-		if config.box_esp and data.box_min and data.box_max then
-			local box_size = data.box_max - data.box_min
-			DrawingImmediate.Rectangle(
-				data.box_min,
-				box_size,
-				config.box_color,
-				config.box_opacity * fade_opacity,
-				config.box_thickness
-			)
+		local prof_start = config.profiling and os_clock()
+		
+		update_local_player()
+		
+		pcall(function()
+			camera = workspace.CurrentCamera
+			camera_position = camera and camera.Position
+			viewport_size = camera and camera.ViewportSize
+			screen_center = viewport_size and vector_create(viewport_size.X * 0.5, viewport_size.Y * 0.5, 0)
+		end)
+		
+		if not camera or not camera_position or not viewport_size or not screen_center then
+			return
 		end
 		
-		local y_offset = 0
+		table_clear(render_data)
+		local render_count = 0
 		
-		-- Name ESP
-		if config.name_esp then
-			local name_text = data.name
-			if config.distance_esp then
-				name_text = `{name_text} [{math_floor(data.distance)}m]`
+		for obj_id, data in pairs(tracked_objects) do
+			if render_count >= config.max_render_objects then
+				break
 			end
 			
-			DrawingImmediate.OutlinedText(
-				screen_pos - vector_create(0, y_offset, 0),
-				config.font_size,
-				config.name_color,
-				config.name_opacity * fade_opacity,
-				name_text,
-				true,
-				config.font
-			)
-			y_offset = y_offset + config.font_size + 2
+			pcall(function()
+				local obj = data.object
+				if not obj or not obj.Parent then return end
+				
+				if should_exclude_object(obj) then return end
+				
+				local pos = get_object_position(obj)
+				if not pos then return end
+				
+				local dx = pos.X - camera_position.X
+				local dy = pos.Y - camera_position.Y
+				local dz = pos.Z - camera_position.Z
+				local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
+				
+				if distance > config.max_distance then return end
+				
+				local screen, visible = camera:WorldToScreenPoint(pos)
+				if not visible then return end
+				
+				local fade_opacity = calculate_fade_opacity(distance)
+				if fade_opacity <= 0 then return end
+				
+				render_count = render_count + 1
+				
+				local rd = {
+					screen_pos = vector_create(screen.X, screen.Y, 0),
+					fade_opacity = fade_opacity,
+					distance = distance,
+					name = data.name,
+				}
+				
+				local is_medium = distance < LOD_DISTANCE_MEDIUM
+				
+				if config.box_esp and distance < BOX_DISTANCE_LIMIT then
+					local cache_entry = box_cache[obj_id]
+					if cache_entry and cache_entry.corners then
+						local box_min, box_max = project_corners_to_screen(cache_entry.corners, camera)
+						
+						if box_min and box_max then
+							rd.box_min = box_min
+							rd.box_size = box_max - box_min
+						end
+					end
+				end
+				
+				if config.name_esp then
+					local dist_floored = math_floor(distance)
+					if config.distance_esp and is_medium then
+						rd.name_text = data.name .. " [" .. dist_floored .. "m]"
+					else
+						rd.name_text = data.name
+					end
+				end
+				
+				rd.draw_tracer = config.tracers and is_medium
+				
+				render_data[render_count] = rd
+			end)
 		end
 		
-		-- Health bar
-		if config.health_bar and data.health and data.max_health and data.max_health > 0 then
-			local bar_width = 100
-			local bar_height = 4
-			local health_percent = data.health / data.max_health
+		for i = 1, render_count do
+			local data = render_data[i]
+			if not data then break end
 			
-			local bar_pos = screen_pos - vector_create(bar_width / 2, y_offset, 0)
+			local fade = data.fade_opacity
 			
-			DrawingImmediate.FilledRectangle(
-				bar_pos,
-				vector_create(bar_width, bar_height, 0),
-				Color3.new(0.2, 0.2, 0.2),
-				0.8 * fade_opacity
-			)
+			if config.box_esp and data.box_min then
+				DrawingImmediate.Rectangle(
+					data.box_min,
+					data.box_size,
+					config.box_color,
+					config.box_opacity * fade,
+					config.box_thickness
+				)
+			end
 			
-			DrawingImmediate.FilledRectangle(
-				bar_pos,
-				vector_create(bar_width * health_percent, bar_height, 0),
-				config.health_bar_color,
-				0.9 * fade_opacity
-			)
+			if config.name_esp and data.name_text then
+				DrawingImmediate.OutlinedText(
+					data.screen_pos,
+					config.font_size,
+					config.name_color,
+					config.name_opacity * fade,
+					data.name_text,
+					true,
+					config.font
+				)
+			end
 			
-			y_offset = y_offset + bar_height + 4
+			if data.draw_tracer then
+				DrawingImmediate.Line(
+					screen_center,
+					data.screen_pos,
+					config.tracer_color,
+					config.tracer_opacity * fade,
+					1,
+					config.tracer_thickness
+				)
+			end
 		end
 		
-		-- Tracers
-		if config.tracers then
-			DrawingImmediate.Line(
-				screen_center,
-				screen_pos,
-				config.tracer_color,
-				config.tracer_opacity * fade_opacity,
-				1,
-				config.tracer_thickness
-			)
+		if config.profiling then
+			profile_times.render = os_clock() - prof_start
+			profile_counters.rendered = render_count
+			
+			frame_count = frame_count + 1
+			if frame_count % 60 == 0 then
+				print(string_format("\n==== ESP Performance Report ===="))
+				print(string_format("Scan:   %.4fms", profile_times.scan * 1000))
+				print(string_format("Render: %.4fms", profile_times.render * 1000))
+				print(string_format("Tracked:  %d", profile_counters.tracked))
+				print(string_format("Rendered: %d", profile_counters.rendered))
+				print(string_format("================================\n"))
+			end
 		end
-	end
+	end)
 end
 
 ---- module ----
@@ -620,116 +534,139 @@ function ESP.new(settings: {[string]: any}?): typeof(ESP)
 		end
 	end
 	
+	local fade_range = config.fade_end - config.fade_start
+	fade_range_inv = fade_range > 0 and (1 / fade_range) or 1
+	
 	update_local_player()
+	
+	print(string_format("[ESP] Initialized - Profiling: %s", config.profiling and "ENABLED" or "DISABLED"))
 	
 	return ESP
 end
 
-function ESP.add_path(path: Instance | string)
-	local actual_path: Instance? = nil
+function ESP.add_path(path: Instance | string): boolean
+	local actual_path = nil
 	
 	if typeof(path) == "string" then
-		local parts = string.split(path, ".")
+		local parts = string_split(path, ".")
 		local current = workspace
 		
-		for _, part in ipairs(parts) do
+		for i = 1, #parts do
 			local success, result = pcall(function()
-				return current:FindFirstChild(part)
+				return current:FindFirstChild(parts[i])
 			end)
 			
 			if success and result then
 				current = result
 			else
-				warn(`failed to find path: {path}`)
 				return false
 			end
 		end
+		
 		actual_path = current
 	elseif typeof(path) == "Instance" then
 		actual_path = path
 	else
-		error(`invalid path type: {typeof(path)}`)
+		return false
 	end
 	
-	assert(actual_path, `path not found: {path}`)
+	if not actual_path then
+		return false
+	end
 	
-	for _, existing in ipairs(active_paths) do
-		if existing == actual_path then
+	for i = 1, #active_paths do
+		if active_paths[i] == actual_path then
 			return true
 		end
 	end
 	
 	table_insert(active_paths, actual_path)
+	print(string_format("[ESP] Added path: %s", tostring(actual_path)))
 	return true
 end
 
-function ESP.remove_path(path: Instance | string)
-	for i, existing in ipairs(active_paths) do
-		if existing == path or existing.Name == path then
+function ESP.remove_path(path: Instance | string): boolean
+	for i = 1, #active_paths do
+		local existing = active_paths[i]
+		local match = false
+		
+		pcall(function()
+			match = (existing == path) or (existing.Name == path)
+		end)
+		
+		if match then
 			table_remove(active_paths, i)
 			return true
 		end
 	end
+	
 	return false
 end
 
 function ESP.set_include(names: {string})
 	assert(typeof(names) == "table", "invalid argument #1 (table expected)")
 	include_filter = names
-	exclude_filter = {}
+	table_clear(exclude_filter)
 end
 
 function ESP.set_exclude(names: {string})
 	assert(typeof(names) == "table", "invalid argument #1 (table expected)")
-	exclude_filter = names
+	table_clear(exclude_filter)
+	
+	for i = 1, #names do
+		exclude_filter[i] = names[i]
+	end
+	
 	include_filter = nil
 end
 
 function ESP.clear_filters()
 	include_filter = nil
-	exclude_filter = {}
+	table_clear(exclude_filter)
 end
 
 function ESP.set_config(key: string, value: any)
-	assert(config[key] ~= nil, `invalid config key: {key}`)
 	config[key] = value
+	
+	if key == "fade_start" or key == "fade_end" then
+		local fade_range = config.fade_end - config.fade_start
+		fade_range_inv = fade_range > 0 and (1 / fade_range) or 1
+	end
 end
 
 function ESP.get_config(key: string): any
 	return config[key]
 end
 
+function ESP.enable_profiling(enabled: boolean)
+	config.profiling = enabled
+	print(string_format("[ESP] Profiling: %s", enabled and "ENABLED" or "DISABLED"))
+end
+
 function ESP.start()
-	if render_connection or update_connection then
-		warn("ESP already running")
+	if running then
+		print("[ESP] Already running")
 		return
 	end
 	
 	config.enabled = true
+	running = true
 	frame_count = 0
 	
-	-- PostLocal: ALL calculations every frame
-	update_connection = RunService.PostLocal:Connect(update_loop)
+	task_spawn(scan_loop)
+	task_spawn(box_cache_loop)
+	render_loop()
 	
-	-- Render: ONLY drawing every frame
-	render_connection = RunService.Render:Connect(render_loop)
+	print("[ESP] Started")
 end
 
 function ESP.stop()
+	running = false
 	config.enabled = false
-	
-	if render_connection then
-		render_connection:Disconnect()
-		render_connection = nil
-	end
-	
-	if update_connection then
-		update_connection:Disconnect()
-		update_connection = nil
-	end
-	
-	tracked_objects = {}
-	render_data = {}
+	table_clear(tracked_objects)
+	table_clear(render_data)
+	table_clear(box_cache)
+	print("[ESP] Stopped")
 end
 
 function ESP.get_tracked_count(): number
@@ -740,5 +677,4 @@ function ESP.get_tracked_count(): number
 	return count
 end
 
----- exports ----
 return ESP
