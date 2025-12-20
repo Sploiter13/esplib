@@ -898,6 +898,14 @@ RunService.Render:Connect(function()
 	
 	local prof_start = config.profiling and os_clock()
 	
+	-- DEBUG: Print every 60 frames
+	if frame_count % 60 == 0 and config.profiling then
+		print(string_format("[DEBUG] Render data size: %d, Sorted count: %d, Physics data count: %d", 
+			render_data_size, sorted_count, 
+			(function() local c = 0 for _ in pairs(physics_data) do c = c + 1 end return c end)()
+		))
+	end
+	
 	for i = 1, render_data_size do
 		local data = render_data[i]
 		if not data then break end
@@ -996,6 +1004,7 @@ RunService.Render:Connect(function()
 		end
 	end
 end)
+
 
 ---- module ----
 local ESP = {}
