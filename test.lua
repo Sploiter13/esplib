@@ -16,6 +16,15 @@ local workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
+
+local function deep_copy(tbl: {[any]: any}): {[any]: any}
+	local copy = table_create(10)
+	for k, v in pairs(tbl) do
+		copy[k] = typeof(v) == "table" and deep_copy(v) or v
+	end
+	return copy
+end
+
 ---- constants ----
 local DEFAULT_CONFIG = {
 	enabled = false,
