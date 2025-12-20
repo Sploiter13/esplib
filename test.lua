@@ -46,7 +46,7 @@ local DEFAULT_CONFIG = {
 	health_bar_color = Color3.new(0, 1, 0),
 	
 	max_distance = 1000,
-	max_render_objects = 200,
+	max_render_objects = 100,
 	font_size = 14,
 	font = "Tamzen",
 	box_thickness = 2,
@@ -63,13 +63,15 @@ local DEFAULT_CONFIG = {
 
 local PART_NAMES = {"HumanoidRootPart", "Head", "UpperTorso", "Torso"}
 local SCAN_INTERVAL = 1
-local DESCENDANTS_CACHE_TIME = 2
+local BOX_CACHE_TIME = 5
+local BOX_DISTANCE_LIMIT = 300
 local LOD_DISTANCE_CLOSE = 200
 local LOD_DISTANCE_MEDIUM = 500
 
 ---- variables ----
 local tracked_objects = {}
-local render_data = table_create(200)
+local box_cache = {}
+local render_data = table_create(100)
 
 local active_paths = table_create(10)
 local include_filter = nil
@@ -92,7 +94,6 @@ local running = false
 ---- profiling ----
 local profile_times = {
 	scan = 0,
-	process = 0,
 	render = 0,
 }
 
@@ -182,112 +183,6 @@ local function should_track_object(obj: Instance): boolean
 	return true
 end
 
-local function get_all_parts(obj: Instance): {Instance}
-	local parts = table_create(50)
-	local count = 0
-	
-	pcall(function()
-		if not obj or not obj.Parent then return end
-		
-		local class_name = obj.ClassName
-		
-		if class_name:find("Part") then
-			count = 1
-			parts[1] = obj
-		elseif class_name == "Model" then
-			local children = obj:GetDescendants()
-			for i = 1, #children do
-				local child = children[i]
-				if child.Parent and child.ClassName:find("Part") then
-					count = count + 1
-					parts[count] = child
-				end
-			end
-		end
-	end)
-	
-	return parts
-end
-
-local function calculate_bounding_box(parts: {Instance}): (vector?, vector?)
-	if #parts == 0 then
-		return nil, nil
-	end
-	
-	local min_x, min_y, min_z = math_huge, math_huge, math_huge
-	local max_x, max_y, max_z = -math_huge, -math_huge, -math_huge
-	local found_any = false
-	
-	for i = 1, #parts do
-		pcall(function()
-			local part = parts[i]
-			if not part or not part.Parent then return end
-			
-			local pos = part.Position
-			local size = part.Size
-			local hsx, hsy, hsz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
-			local px, py, pz = pos.X, pos.Y, pos.Z
-			
-			min_x = math_min(min_x, px - hsx)
-			min_y = math_min(min_y, py - hsy)
-			min_z = math_min(min_z, pz - hsz)
-			max_x = math_max(max_x, px + hsx)
-			max_y = math_max(max_y, py + hsy)
-			max_z = math_max(max_z, pz + hsz)
-			
-			found_any = true
-		end)
-	end
-	
-	if not found_any then
-		return nil, nil
-	end
-	
-	return vector_create(min_x, min_y, min_z), vector_create(max_x, max_y, max_z)
-end
-
-local function calculate_bounding_corners(min_bound: vector, max_bound: vector): {vector}
-	local mnx, mny, mnz = min_bound.X, min_bound.Y, min_bound.Z
-	local mxx, mxy, mxz = max_bound.X, max_bound.Y, max_bound.Z
-	
-	return {
-		vector_create(mnx, mny, mnz),
-		vector_create(mxx, mny, mnz),
-		vector_create(mxx, mny, mxz),
-		vector_create(mnx, mny, mxz),
-		vector_create(mnx, mxy, mnz),
-		vector_create(mxx, mxy, mnz),
-		vector_create(mxx, mxy, mxz),
-		vector_create(mnx, mxy, mxz),
-	}
-end
-
-local function project_corners_to_screen(corners: {vector}, cam: Instance): (vector?, vector?)
-	local min_x, min_y = math_huge, math_huge
-	local max_x, max_y = -math_huge, -math_huge
-	local any_visible = false
-	
-	pcall(function()
-		for i = 1, 8 do
-			local screen_pos, visible = cam:WorldToScreenPoint(corners[i])
-			if visible then
-				any_visible = true
-				local sx, sy = screen_pos.X, screen_pos.Y
-				min_x = math_min(min_x, sx)
-				min_y = math_min(min_y, sy)
-				max_x = math_max(max_x, sx)
-				max_y = math_max(max_y, sy)
-			end
-		end
-	end)
-	
-	if not any_visible then
-		return nil, nil
-	end
-	
-	return vector_create(min_x, min_y, 0), vector_create(max_x, max_y, 0)
-end
-
 local function get_object_position(obj: Instance): vector?
 	local success, result = pcall(function()
 		if not obj or not obj.Parent then return nil end
@@ -322,20 +217,76 @@ local function get_object_position(obj: Instance): vector?
 	return success and result or nil
 end
 
-local function get_object_health(obj: Instance): (number?, number?)
-	local success, health, max_health = pcall(function()
-		if not obj or not obj.Parent or obj.ClassName ~= "Model" then
-			return nil, nil
+local function get_simple_box_corners(obj: Instance): {vector}?
+	local success, corners = pcall(function()
+		if not obj or not obj.Parent then return nil end
+		
+		local pos, size
+		
+		if obj.ClassName == "Model" then
+			local primary = obj.PrimaryPart
+			if primary and primary.Parent then
+				pos = primary.Position
+				size = primary.Size
+			else
+				for i = 1, #PART_NAMES do
+					local part = obj:FindFirstChild(PART_NAMES[i])
+					if part and part.Parent and part.ClassName:find("Part") then
+						pos = part.Position
+						size = part.Size
+						break
+					end
+				end
+			end
+		elseif obj.ClassName:find("Part") then
+			pos = obj.Position
+			size = obj.Size
 		end
 		
-		local humanoid = obj:FindFirstChildOfClass("Humanoid")
-		if humanoid and humanoid.Parent then
-			return humanoid.Health, humanoid.MaxHealth
-		end
-		return nil, nil
+		if not pos or not size then return nil end
+		
+		local hsx, hsy, hsz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
+		local px, py, pz = pos.X, pos.Y, pos.Z
+		
+		return {
+			vector_create(px - hsx, py - hsy, pz - hsz),
+			vector_create(px + hsx, py - hsy, pz - hsz),
+			vector_create(px + hsx, py - hsy, pz + hsz),
+			vector_create(px - hsx, py - hsy, pz + hsz),
+			vector_create(px - hsx, py + hsy, pz - hsz),
+			vector_create(px + hsx, py + hsy, pz - hsz),
+			vector_create(px + hsx, py + hsy, pz + hsz),
+			vector_create(px - hsx, py + hsy, pz + hsz),
+		}
 	end)
 	
-	return success and health or nil, success and max_health or nil
+	return success and corners or nil
+end
+
+local function project_corners_to_screen(corners: {vector}, cam: Instance): (vector?, vector?)
+	local min_x, min_y = math_huge, math_huge
+	local max_x, max_y = -math_huge, -math_huge
+	local any_visible = false
+	
+	pcall(function()
+		for i = 1, 8 do
+			local screen_pos, visible = cam:WorldToScreenPoint(corners[i])
+			if visible then
+				any_visible = true
+				local sx, sy = screen_pos.X, screen_pos.Y
+				min_x = math_min(min_x, sx)
+				min_y = math_min(min_y, sy)
+				max_x = math_max(max_x, sx)
+				max_y = math_max(max_y, sy)
+			end
+		end
+	end)
+	
+	if not any_visible then
+		return nil, nil
+	end
+	
+	return vector_create(min_x, min_y, 0), vector_create(max_x, max_y, 0)
 end
 
 local function scan_paths()
@@ -390,6 +341,37 @@ local function scan_loop()
 			scan_paths()
 		end
 		task_wait(SCAN_INTERVAL)
+	end
+end
+
+---- box cache update loop ----
+local function box_cache_loop()
+	while running do
+		if config.enabled and config.box_esp then
+			local current_time = os_clock()
+			
+			for obj_id, data in pairs(tracked_objects) do
+				local cache_entry = box_cache[obj_id]
+				
+				if not cache_entry or (current_time - cache_entry.time) > BOX_CACHE_TIME then
+					pcall(function()
+						local obj = data.object
+						if obj and obj.Parent then
+							local corners = get_simple_box_corners(obj)
+							if corners then
+								box_cache[obj_id] = {
+									corners = corners,
+									time = current_time,
+								}
+							end
+						end
+					end)
+				end
+				
+				task_wait(0.01)
+			end
+		end
+		task_wait(0.5)
 	end
 end
 
@@ -452,16 +434,12 @@ local function render_loop()
 					name = data.name,
 				}
 				
-				local is_close = distance < LOD_DISTANCE_CLOSE
 				local is_medium = distance < LOD_DISTANCE_MEDIUM
 				
-				if config.box_esp then
-					local parts = get_all_parts(obj)
-					local min_bound, max_bound = calculate_bounding_box(parts)
-					
-					if min_bound and max_bound then
-						local corners = calculate_bounding_corners(min_bound, max_bound)
-						local box_min, box_max = project_corners_to_screen(corners, camera)
+				if config.box_esp and distance < BOX_DISTANCE_LIMIT then
+					local cache_entry = box_cache[obj_id]
+					if cache_entry and cache_entry.corners then
+						local box_min, box_max = project_corners_to_screen(cache_entry.corners, camera)
 						
 						if box_min and box_max then
 							rd.box_min = box_min
@@ -476,15 +454,6 @@ local function render_loop()
 						rd.name_text = data.name .. " [" .. dist_floored .. "m]"
 					else
 						rd.name_text = data.name
-					end
-				end
-				
-				if config.health_bar and is_medium then
-					local health, max_health = get_object_health(obj)
-					if health and max_health and max_health > 0 then
-						rd.health = health
-						rd.max_health = max_health
-						rd.bar_width = is_close and 100 or 60
 					end
 				end
 				
@@ -519,26 +488,6 @@ local function render_loop()
 					data.name_text,
 					true,
 					config.font
-				)
-			end
-			
-			if data.health and data.max_health then
-				local bar_height = 4
-				local health_percent = data.health / data.max_health
-				local bar_pos = vector_create(data.screen_pos.X - data.bar_width * 0.5, data.screen_pos.Y + config.font_size + 2, 0)
-				
-				DrawingImmediate.FilledRectangle(
-					bar_pos,
-					vector_create(data.bar_width, bar_height, 0),
-					Color3.new(0.2, 0.2, 0.2),
-					0.8 * fade
-				)
-				
-				DrawingImmediate.FilledRectangle(
-					bar_pos,
-					vector_create(data.bar_width * health_percent, bar_height, 0),
-					config.health_bar_color,
-					0.9 * fade
 				)
 			end
 			
@@ -705,6 +654,7 @@ function ESP.start()
 	frame_count = 0
 	
 	task_spawn(scan_loop)
+	task_spawn(box_cache_loop)
 	render_loop()
 	
 	print("[ESP] Started")
@@ -715,6 +665,7 @@ function ESP.stop()
 	config.enabled = false
 	table_clear(tracked_objects)
 	table_clear(render_data)
+	table_clear(box_cache)
 	print("[ESP] Stopped")
 end
 
