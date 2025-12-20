@@ -19,7 +19,7 @@ local RunService = game:GetService("RunService")
 ---- constants ----
 local DEFAULT_CONFIG = {
 	enabled = true,
-	profiling = false,
+	profiling = true,
 	static_mode = false,
 	auto_static_mode = true,
 	static_threshold = 1000,
