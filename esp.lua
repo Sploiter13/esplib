@@ -187,6 +187,21 @@ local function get_object_position(obj: Instance): vector?
 	local success, result = pcall(function()
 		if not obj or not obj.Parent then return nil end
 		
+		if obj.ClassName == "Tool" then
+			local handle = obj:FindFirstChild("Handle")
+			if handle and handle.Parent and handle.ClassName:find("Part") then
+				return handle.Position
+			end
+			
+			local children = obj:GetChildren()
+			for i = 1, #children do
+				local child = children[i]
+				if child.Parent and child.ClassName:find("Part") then
+					return child.Position
+				end
+			end
+		end
+		
 		if obj.ClassName == "Model" then
 			local primary = obj.PrimaryPart
 			if primary and primary.Parent then
@@ -217,13 +232,30 @@ local function get_object_position(obj: Instance): vector?
 	return success and result or nil
 end
 
+
 local function get_simple_box_corners(obj: Instance): {vector}?
 	local success, corners = pcall(function()
 		if not obj or not obj.Parent then return nil end
 		
 		local pos, size
 		
-		if obj.ClassName == "Model" then
+		if obj.ClassName == "Tool" then
+			local handle = obj:FindFirstChild("Handle")
+			if handle and handle.Parent and handle.ClassName:find("Part") then
+				pos = handle.Position
+				size = handle.Size
+			else
+				local children = obj:GetChildren()
+				for i = 1, #children do
+					local child = children[i]
+					if child.Parent and child.ClassName:find("Part") then
+						pos = child.Position
+						size = child.Size
+						break
+					end
+				end
+			end
+		elseif obj.ClassName == "Model" then
 			local primary = obj.PrimaryPart
 			if primary and primary.Parent then
 				pos = primary.Position
