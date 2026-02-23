@@ -189,7 +189,7 @@ local function get_object_position(obj: Instance): vector?
 		
 		if obj.ClassName == "Tool" then
 			local handle = obj:FindFirstChild("Handle")
-			if handle and handle.Parent and handle.ClassName:find("Part") then
+			if handle and handle.Parent and handle.ClassName:find("Part") or handle.ClassName:find("Union") then
 				return handle.Position
 			end
 			
