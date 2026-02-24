@@ -34,6 +34,7 @@ local DEFAULT_CONFIG = {
 	
 	scan_budget = 150,
 	scan_interval = 0.1,
+	scan_stale_passes = 1,
 	box_cache_budget = 25,
 	box_cache_interval = 0.5,
 	dynamic_update_interval = 0.05,
@@ -100,6 +101,7 @@ local fade_range_inv = 1
 local running = false
 local scan_cursor = { path = 1, child = 1 }
 local scan_new_pass = true
+local scan_pass_id = 0
 local box_cache_cursor = { keys = {}, index = 1 }
 local last_scan_time = 0
 local last_box_cache_time = 0
@@ -213,7 +215,7 @@ local function get_object_position(obj: Instance): vector?
 		
 		if obj.ClassName == "Tool" then
 			local handle = obj:FindFirstChild("Handle")
-			if handle and handle.Parent and handle.ClassName:find("Part") or handle.ClassName:find("Union") then
+			if handle and handle.Parent and (handle.ClassName:find("Part") or handle.ClassName:find("Union")) then
 				return handle.Position
 			end
 			
@@ -232,11 +234,21 @@ local function get_object_position(obj: Instance): vector?
 				return primary.Position
 			end
 			
+			local hrp = obj:FindFirstChild("HumanoidRootPart")
+			if hrp and hrp.Parent and hrp.ClassName:find("Part") then
+				return hrp.Position
+			end
+			
 			for i = 1, #PART_NAMES do
 				local part = obj:FindFirstChild(PART_NAMES[i])
 				if part and part.Parent and part.ClassName:find("Part") then
 					return part.Position
 				end
+			end
+			
+			local bb_cframe, bb_size = obj:GetBoundingBox()
+			if bb_cframe then
+				return bb_cframe.Position
 			end
 			
 			local children = obj:GetChildren()
@@ -408,8 +420,7 @@ local function scan_step()
 	last_scan_time = now
 	
 	if scan_new_pass then
-		table_clear(tracked_objects)
-		rebuild_box_cache_keys()
+		scan_pass_id = scan_pass_id + 1
 		scan_new_pass = false
 	end
 	
@@ -422,6 +433,16 @@ local function scan_step()
 			scan_cursor.path = 1
 			scan_cursor.child = 1
 			scan_new_pass = true
+			
+			for obj_id, data in pairs(tracked_objects) do
+				if data.last_pass ~= scan_pass_id and (scan_pass_id - (data.last_pass or 0)) >= config.scan_stale_passes then
+					tracked_objects[obj_id] = nil
+					box_cache[obj_id] = nil
+					destroy_dynamic_entry(obj_id)
+				end
+			end
+			
+			rebuild_box_cache_keys()
 			break
 		end
 		
@@ -456,11 +477,20 @@ local function scan_step()
 						end)
 						
 						local obj_id = tostring(child)
-						tracked_objects[obj_id] = {
-							object = child,
-							name = obj_name or "Unknown",
-							position = position,
-						}
+						local existing = tracked_objects[obj_id]
+						if existing then
+							existing.object = child
+							existing.name = obj_name or existing.name or "Unknown"
+							existing.position = position
+							existing.last_pass = scan_pass_id
+						else
+							tracked_objects[obj_id] = {
+								object = child,
+								name = obj_name or "Unknown",
+								position = position,
+								last_pass = scan_pass_id,
+							}
+						end
 					end
 				end
 				
@@ -647,7 +677,27 @@ local function sync_dynamic_entries()
 				end
 			end
 			
-			local pos = get_object_position(obj)
+			local pos = nil
+			local point = entry.point
+			if point then
+				local ok, cframe = pcall(function()
+					return point.CFrame
+				end)
+				if ok and cframe then
+					pos = cframe.Position
+				else
+					local ok2, p = pcall(function()
+						return point.Position
+					end)
+					if ok2 and p then
+						pos = p
+					end
+				end
+			end
+			
+			if not pos then
+				pos = get_object_position(obj)
+			end
 			if not pos then
 				update_dynamic_entry(entry, 0, 0, nil)
 				continue
