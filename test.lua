@@ -38,6 +38,7 @@ local DEFAULT_CONFIG = {
 	box_cache_budget = 25,
 	box_cache_interval = 0.5,
 	dynamic_update_interval = 0.05,
+	dynamic_stale_passes = 2,
 	
 	name_esp = true,
 	distance_esp = true,
@@ -93,6 +94,7 @@ local screen_center = nil
 
 local local_player = nil
 local local_character = nil
+local local_root = nil
 
 local config = {}
 local frame_count = 0
@@ -142,7 +144,16 @@ local function update_local_player()
 	pcall(function()
 		local_player = Players.LocalPlayer
 		local_character = local_player and local_player.Character
+		local_root = local_character and local_character:FindFirstChild("HumanoidRootPart")
 	end)
+end
+
+local function get_local_position(): vector?
+	if local_root and local_root.Parent then
+		return local_root.Position
+	end
+	update_local_player()
+	return local_root and local_root.Parent and local_root.Position or nil
 end
 
 local function is_player_character(obj: Instance): boolean
@@ -658,6 +669,9 @@ local function sync_dynamic_entries()
 	local cam_pos = cam and cam.Position
 	if not cam_pos then return end
 	
+	local local_pos = get_local_position()
+	if not local_pos then return end
+	
 	local seen = {}
 	
 	for obj_id, data in pairs(tracked_objects) do
@@ -703,9 +717,9 @@ local function sync_dynamic_entries()
 				continue
 			end
 			
-			local dx = pos.X - cam_pos.X
-			local dy = pos.Y - cam_pos.Y
-			local dz = pos.Z - cam_pos.Z
+			local dx = pos.X - local_pos.X
+			local dy = pos.Y - local_pos.Y
+			local dz = pos.Z - local_pos.Z
 			local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
 			
 			if distance > config.max_distance then
@@ -733,9 +747,14 @@ local function sync_dynamic_entries()
 		end
 	end
 	
-	for obj_id in pairs(dynamic_entries) do
+	for obj_id, entry in pairs(dynamic_entries) do
 		if not seen[obj_id] then
-			destroy_dynamic_entry(obj_id)
+			entry.miss_count = (entry.miss_count or 0) + 1
+			if entry.miss_count >= config.dynamic_stale_passes then
+				destroy_dynamic_entry(obj_id)
+			end
+		else
+			entry.miss_count = 0
 		end
 	end
 end
@@ -826,9 +845,12 @@ local function render_loop()
 				local pos = get_object_position(obj)
 				if not pos then return end
 				
-				local dx = pos.X - camera_position.X
-				local dy = pos.Y - camera_position.Y
-				local dz = pos.Z - camera_position.Z
+				local local_pos = get_local_position()
+				if not local_pos then return end
+				
+				local dx = pos.X - local_pos.X
+				local dy = pos.Y - local_pos.Y
+				local dz = pos.Z - local_pos.Z
 				local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
 				
 				if distance > config.max_distance then return end
