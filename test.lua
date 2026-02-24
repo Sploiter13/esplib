@@ -463,7 +463,7 @@ end
 local function update_dynamic()
     if not config.Dynamic then return end
 
-    local now = os_clock()
+    local now = os.clock()
     if (now - last_dynamic_update_time) < config.dynamic_update_interval then
         return
     end
