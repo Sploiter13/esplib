@@ -31,9 +31,7 @@ local DEFAULT_CONFIG = {
 	enabled = false,
 	profiling = false,
 	Dynamic = false,
-	
-	scan_budget = 150,
-	scan_interval = 0.1,
+	scan_interval = 0.15,
 	box_cache_budget = 25,
 	box_cache_interval = 0.5,
 	dynamic_update_interval = 0.05,
@@ -100,8 +98,8 @@ local frame_count = 0
 local fade_range_inv = 1
 
 local running = false
-local scan_cursor = { path = 1, child = 1 }
-local scan_new_pass = true
+local scan_cursor = nil
+local scan_new_pass = nil
 local box_cache_cursor = { keys = {}, index = 1 }
 local last_scan_time = 0
 local last_prune_time = 0
@@ -380,6 +378,7 @@ end
 local function scan_paths()
 	local prof_start = config.profiling and os_clock()
 	local now = os_clock()
+	local seen = {}
 	
 	for path_idx = 1, #active_paths do
 		pcall(function()
@@ -402,6 +401,7 @@ local function scan_paths()
 						
 						local obj_id = get_object_key(obj)
 						if not obj_id then return end
+						seen[obj_id] = true
 						local existing = tracked_objects[obj_id]
 						if existing then
 							existing.object = obj
@@ -418,6 +418,17 @@ local function scan_paths()
 				end
 			end
 		end)
+	end
+	
+	for obj_id, data in pairs(tracked_objects) do
+		if not seen[obj_id] then
+			local o = data and data.object
+			if not o or not o.Parent then
+				tracked_objects[obj_id] = nil
+				box_cache[obj_id] = nil
+				destroy_dynamic_entry(obj_id)
+			end
+		end
 	end
 	
 	if config.profiling then
@@ -437,98 +448,7 @@ local function rebuild_box_cache_keys()
 	box_cache_cursor.index = 1
 end
 
-local function prune_tracked(now: number)
-	if (now - last_prune_time) < config.scan_interval then
-		return
-	end
-	last_prune_time = now
-	
-	for obj, data in pairs(tracked_objects) do
-		local o = data and data.object
-		if not o or not o.Parent then
-			tracked_objects[obj] = nil
-			box_cache[obj] = nil
-			destroy_dynamic_entry(obj)
-		end
-	end
-end
-
-local function scan_step()
-	if not config.enabled then return end
-	
-	local now = os_clock()
-	if (now - last_scan_time) < config.scan_interval then
-		return
-	end
-	last_scan_time = now
-	
-	local budget = config.scan_budget
-	local processed = 0
-	
-	while processed < budget do
-		local path = active_paths[scan_cursor.path]
-		if not path then
-			scan_cursor.path = 1
-			scan_cursor.child = 1
-			scan_new_pass = true
-			rebuild_box_cache_keys()
-			break
-		end
-		
-		local children = nil
-		pcall(function()
-			children = path:GetChildren()
-		end)
-		
-		if not children then
-			scan_cursor.path = scan_cursor.path + 1
-			scan_cursor.child = 1
-			processed = processed + 1
-		else
-			local child = children[scan_cursor.child]
-			if not child then
-				scan_cursor.path = scan_cursor.path + 1
-				scan_cursor.child = 1
-				if not active_paths[scan_cursor.path] then
-					scan_cursor.path = 1
-					scan_cursor.child = 1
-					scan_new_pass = true
-					rebuild_box_cache_keys()
-					break
-				end
-				processed = processed + 1
-			else
-				if should_track_object(child) then
-					local obj_name
-					pcall(function()
-						obj_name = child.Name
-					end)
-					
-					local obj_id = get_object_key(child)
-					if obj_id then
-						local existing = tracked_objects[obj_id]
-						if existing then
-							existing.object = child
-							existing.name = obj_name or existing.name or "Unknown"
-							existing.last_seen = now
-						else
-							tracked_objects[obj_id] = {
-								object = child,
-								name = obj_name or "Unknown",
-								last_seen = now,
-							}
-						end
-					end
-				end
-				
-				scan_cursor.child = scan_cursor.child + 1
-				processed = processed + 1
-			end
-		end
-	end
-	
-	prune_tracked(now)
-end
+-- scan_step removed; scan_paths is used for both modes
 
 local function destroy_dynamic_entry(obj_id: string)
 	local entry = dynamic_entries[obj_id]
@@ -1129,7 +1049,12 @@ function ESP.start()
 	rebuild_box_cache_keys()
 	
 	scan_connection = RunService.PostModel:Connect(function()
-		pcall(scan_step)
+		local now = os_clock()
+		if (now - last_scan_time) >= config.scan_interval then
+			last_scan_time = now
+			pcall(scan_paths)
+			rebuild_box_cache_keys()
+		end
 		pcall(box_cache_step)
 	end)
 	
