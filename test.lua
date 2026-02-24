@@ -30,7 +30,7 @@ end
 local DEFAULT_CONFIG = {
 	enabled = false,
 	profiling = false,
-	Dynamic = false,
+	Dynamic = true,
 	
 	name_esp = true,
 	distance_esp = true,
