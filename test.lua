@@ -62,6 +62,7 @@ local local_root = nil
 local tracked = {} -- [key] = entry
 
 local last_scan_time = 0
+local last_dynamic_update_time = 0
 local scan_connection = nil
 local dynamic_connection = nil
 local render_connection = nil
@@ -463,7 +464,7 @@ end
 local function update_dynamic()
     if not config.Dynamic then return end
 
-    local now = os.clock()
+    local now = os_clock()
     if (now - last_dynamic_update_time) < config.dynamic_update_interval then
         return
     end
