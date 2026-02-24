@@ -34,11 +34,9 @@ local DEFAULT_CONFIG = {
 	
 	scan_budget = 150,
 	scan_interval = 0.1,
-	scan_stale_time = 1.5,
 	box_cache_budget = 25,
 	box_cache_interval = 0.5,
 	dynamic_update_interval = 0.05,
-	dynamic_stale_time = 2.0,
 	
 	name_esp = true,
 	distance_esp = true,
@@ -370,8 +368,7 @@ end
 
 local function scan_paths()
 	local prof_start = config.profiling and os_clock()
-	
-	table_clear(tracked_objects)
+	local now = os_clock()
 	
 	for path_idx = 1, #active_paths do
 		pcall(function()
@@ -392,12 +389,16 @@ local function scan_paths()
 							obj_name = obj.Name
 						end)
 						
-						local obj_id = tostring(obj)
-						tracked_objects[obj_id] = {
-							object = obj,
-							name = obj_name or "Unknown",
-							position = position,
-						}
+						local existing = tracked_objects[obj]
+						if existing then
+							existing.name = obj_name or existing.name or "Unknown"
+							existing.last_seen = now
+						else
+							tracked_objects[obj] = {
+								name = obj_name or "Unknown",
+								last_seen = now,
+							}
+						end
 					end
 				end
 			end
@@ -415,8 +416,8 @@ end
 
 local function rebuild_box_cache_keys()
 	table_clear(box_cache_cursor.keys)
-	for obj_id in pairs(tracked_objects) do
-		box_cache_cursor.keys[#box_cache_cursor.keys + 1] = obj_id
+	for obj in pairs(tracked_objects) do
+		box_cache_cursor.keys[#box_cache_cursor.keys + 1] = obj
 	end
 	box_cache_cursor.index = 1
 end
@@ -427,19 +428,11 @@ local function prune_tracked(now: number)
 	end
 	last_prune_time = now
 	
-	for obj_id, data in pairs(tracked_objects) do
-		local obj = data.object
+	for obj, data in pairs(tracked_objects) do
 		if not obj or not obj.Parent then
-			tracked_objects[obj_id] = nil
-			box_cache[obj_id] = nil
-			destroy_dynamic_entry(obj_id)
-		else
-			local age = now - (data.last_seen or 0)
-			if age > config.scan_stale_time then
-				tracked_objects[obj_id] = nil
-				box_cache[obj_id] = nil
-				destroy_dynamic_entry(obj_id)
-			end
+			tracked_objects[obj] = nil
+			box_cache[obj] = nil
+			destroy_dynamic_entry(obj)
 		end
 	end
 end
@@ -495,15 +488,12 @@ local function scan_step()
 						obj_name = child.Name
 					end)
 					
-					local obj_id = tostring(child)
-					local existing = tracked_objects[obj_id]
+					local existing = tracked_objects[child]
 					if existing then
-						existing.object = child
 						existing.name = obj_name or existing.name or "Unknown"
 						existing.last_seen = now
 					else
-						tracked_objects[obj_id] = {
-							object = child,
+						tracked_objects[child] = {
 							name = obj_name or "Unknown",
 							last_seen = now,
 						}
@@ -519,8 +509,8 @@ local function scan_step()
 	prune_tracked(now)
 end
 
-local function destroy_dynamic_entry(obj_id: string)
-	local entry = dynamic_entries[obj_id]
+local function destroy_dynamic_entry(obj: Instance)
+	local entry = dynamic_entries[obj]
 	if not entry then return end
 	
 	if entry.cluster then
@@ -546,12 +536,12 @@ local function destroy_dynamic_entry(obj_id: string)
 		end
 	end
 	
-	dynamic_entries[obj_id] = nil
+	dynamic_entries[obj] = nil
 end
 
 local function clear_dynamic_entries()
-	for obj_id in pairs(dynamic_entries) do
-		destroy_dynamic_entry(obj_id)
+	for obj in pairs(dynamic_entries) do
+		destroy_dynamic_entry(obj)
 	end
 end
 
@@ -575,7 +565,7 @@ local function make_dynamic_point(obj: Instance): any
 	return nil
 end
 
-local function create_dynamic_entry(obj_id: string, obj: Instance, name: string)
+local function create_dynamic_entry(obj: Instance, name: string)
 	local point = make_dynamic_point(obj)
 	if not point then return nil end
 	
@@ -679,16 +669,15 @@ local function sync_dynamic_entries()
 	local local_pos = get_local_position()
 	if not local_pos then return end
 	
-	for obj_id, data in pairs(tracked_objects) do
-		local obj = data.object
+	for obj, data in pairs(tracked_objects) do
 		if not obj or not obj.Parent then
-			destroy_dynamic_entry(obj_id)
+			destroy_dynamic_entry(obj)
 		else
-			local entry = dynamic_entries[obj_id]
+			local entry = dynamic_entries[obj]
 			if not entry then
-				entry = create_dynamic_entry(obj_id, obj, data.name)
+				entry = create_dynamic_entry(obj, data.name)
 				if entry then
-					dynamic_entries[obj_id] = entry
+					dynamic_entries[obj] = entry
 				else
 					continue
 				end
@@ -750,16 +739,9 @@ local function sync_dynamic_entries()
 		end
 	end
 	
-	local now2 = os_clock()
-	for obj_id, entry in pairs(dynamic_entries) do
-		local tracked = tracked_objects[obj_id]
-		if not tracked then
-			local age = now2 - (entry.last_seen or now2)
-			if age > config.dynamic_stale_time then
-				destroy_dynamic_entry(obj_id)
-			end
-		else
-			entry.last_seen = now2
+	for obj in pairs(dynamic_entries) do
+		if not obj or not obj.Parent then
+			destroy_dynamic_entry(obj)
 		end
 	end
 end
@@ -782,22 +764,21 @@ local function box_cache_step()
 	local processed = 0
 	
 	while processed < budget do
-		local obj_id = box_cache_cursor.keys[box_cache_cursor.index]
-		if not obj_id then
+		local obj = box_cache_cursor.keys[box_cache_cursor.index]
+		if not obj then
 			break
 		end
 		
-		local data = tracked_objects[obj_id]
-		local cache_entry = box_cache[obj_id]
+		local data = tracked_objects[obj]
+		local cache_entry = box_cache[obj]
 		
 		if data then
 			if not cache_entry or (now - cache_entry.time) > BOX_CACHE_TIME then
 				pcall(function()
-					local obj = data.object
 					if obj and obj.Parent then
 						local corners = get_simple_box_corners(obj)
 						if corners then
-							box_cache[obj_id] = {
+							box_cache[obj] = {
 								corners = corners,
 								time = now,
 							}
@@ -836,16 +817,15 @@ local function render_loop()
 		table_clear(render_data)
 		local render_count = 0
 		
-		for obj_id, data in pairs(tracked_objects) do
-			if render_count >= config.max_render_objects then
-				break
-			end
+	for obj, data in pairs(tracked_objects) do
+		if render_count >= config.max_render_objects then
+			break
+		end
+		
+		pcall(function()
+			if not obj or not obj.Parent then return end
 			
-			pcall(function()
-				local obj = data.object
-				if not obj or not obj.Parent then return end
-				
-				if should_exclude_object(obj) then return end
+			if should_exclude_object(obj) then return end
 				
 				local pos = get_object_position(obj)
 				if not pos then return end
@@ -877,10 +857,10 @@ local function render_loop()
 				
 				local is_medium = distance < LOD_DISTANCE_MEDIUM
 				
-				if config.box_esp and distance < BOX_DISTANCE_LIMIT then
-					local cache_entry = box_cache[obj_id]
-					if cache_entry and cache_entry.corners then
-						local box_min, box_max = project_corners_to_screen(cache_entry.corners, camera)
+			if config.box_esp and distance < BOX_DISTANCE_LIMIT then
+				local cache_entry = box_cache[obj]
+				if cache_entry and cache_entry.corners then
+					local box_min, box_max = project_corners_to_screen(cache_entry.corners, camera)
 						
 						if box_min and box_max then
 							rd.box_min = box_min
@@ -900,9 +880,9 @@ local function render_loop()
 				
 				rd.draw_tracer = config.tracers and is_medium
 				
-				render_data[render_count] = rd
-			end)
-		end
+			render_data[render_count] = rd
+		end)
+	end
 		
 		for i = 1, render_count do
 			local data = render_data[i]
