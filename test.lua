@@ -30,6 +30,7 @@ end
 local DEFAULT_CONFIG = {
 	enabled = false,
 	profiling = false,
+	Dynamic = false,
 	
 	name_esp = true,
 	distance_esp = true,
@@ -70,6 +71,7 @@ local LOD_DISTANCE_MEDIUM = 500
 
 ---- variables ----
 local tracked_objects = {}
+local dynamic_entries = {}
 local box_cache = {}
 local render_data = table_create(100)
 
@@ -187,6 +189,21 @@ local function get_object_position(obj: Instance): vector?
 	local success, result = pcall(function()
 		if not obj or not obj.Parent then return nil end
 		
+		if obj.ClassName == "Tool" then
+			local handle = obj:FindFirstChild("Handle")
+			if handle and handle.Parent and handle.ClassName:find("Part") or handle.ClassName:find("Union") then
+				return handle.Position
+			end
+			
+			local children = obj:GetChildren()
+			for i = 1, #children do
+				local child = children[i]
+				if child.Parent and child.ClassName:find("Part") then
+					return child.Position
+				end
+			end
+		end
+		
 		if obj.ClassName == "Model" then
 			local primary = obj.PrimaryPart
 			if primary and primary.Parent then
@@ -217,13 +234,30 @@ local function get_object_position(obj: Instance): vector?
 	return success and result or nil
 end
 
+
 local function get_simple_box_corners(obj: Instance): {vector}?
 	local success, corners = pcall(function()
 		if not obj or not obj.Parent then return nil end
 		
 		local pos, size
 		
-		if obj.ClassName == "Model" then
+		if obj.ClassName == "Tool" then
+			local handle = obj:FindFirstChild("Handle")
+			if handle and handle.Parent and handle.ClassName:find("Part") then
+				pos = handle.Position
+				size = handle.Size
+			else
+				local children = obj:GetChildren()
+				for i = 1, #children do
+					local child = children[i]
+					if child.Parent and child.ClassName:find("Part") then
+						pos = child.Position
+						size = child.Size
+						break
+					end
+				end
+			end
+		elseif obj.ClassName == "Model" then
 			local primary = obj.PrimaryPart
 			if primary and primary.Parent then
 				pos = primary.Position
@@ -334,11 +368,218 @@ local function scan_paths()
 	end
 end
 
+local function destroy_dynamic_entry(obj_id: string)
+	local entry = dynamic_entries[obj_id]
+	if not entry then return end
+	
+	if entry.cluster then
+		pcall(function()
+			entry.cluster:Destroy()
+		end)
+	end
+	
+	if entry.point then
+		pcall(function()
+			entry.point:Destroy()
+		end)
+	end
+	
+	if entry.drawings then
+		for i = 1, #entry.drawings do
+			pcall(function()
+				entry.drawings[i]:Remove()
+			end)
+		end
+	end
+	
+	dynamic_entries[obj_id] = nil
+end
+
+local function clear_dynamic_entries()
+	for obj_id in pairs(dynamic_entries) do
+		destroy_dynamic_entry(obj_id)
+	end
+end
+
+local function make_dynamic_point(obj: Instance): any
+	if obj.ClassName == "Model" then
+		if not PointModel then return nil end
+		return PointModel.new(obj)
+	end
+	
+	if obj.ClassName == "Tool" then
+		local handle = obj:FindFirstChild("Handle")
+		if handle and handle.Parent and handle.ClassName:find("Part") then
+			return PointInstance.new(handle)
+		end
+	end
+	
+	if obj.ClassName:find("Part") then
+		return PointInstance.new(obj)
+	end
+	
+	return nil
+end
+
+local function create_dynamic_entry(obj_id: string, obj: Instance, name: string)
+	local point = make_dynamic_point(obj)
+	if not point then return nil end
+	
+	local drawings = table_create(2)
+	local attach_config = {}
+	
+	if config.box_esp then
+		local box = Drawing.new("Square")
+		box.Visible = true
+		box.Filled = false
+		box.Color = config.box_color
+		box.Thickness = config.box_thickness
+		box.Opacity = config.box_opacity
+		
+		drawings[#drawings + 1] = box
+		attach_config[box] = {
+			Link = point,
+			Size = UDim2.fromScale(1, 1),
+			AnchorPoint = Vector2.new(0.5, 0.5),
+		}
+	end
+	
+	if config.name_esp then
+		local text = Drawing.new("Text")
+		text.Visible = true
+		text.Color = config.name_color
+		text.Size = config.font_size
+		text.Center = true
+		text.Outline = true
+		text.Opacity = config.name_opacity
+		
+		local font_value = config.font
+		if typeof(font_value) ~= "number" then
+			font_value = 2
+		end
+		text.Font = font_value
+		
+		drawings[#drawings + 1] = text
+		attach_config[text] = {
+			Link = point,
+			Size = UDim2.fromOffset(0, 0),
+			AnchorPoint = Vector2.new(0.5, 1),
+		}
+	end
+	
+	if #drawings == 0 then
+		pcall(function()
+			point:Destroy()
+		end)
+		return nil
+	end
+	
+	local cluster = Drawing.attach(attach_config)
+	
+	return {
+		point = point,
+		cluster = cluster,
+		drawings = drawings,
+		object = obj,
+		name = name,
+	}
+end
+
+local function update_dynamic_entry(entry, distance: number, fade: number, name_text: string?)
+	for i = 1, #entry.drawings do
+		local d = entry.drawings[i]
+		if d.ClassName == "Square" then
+			d.Visible = config.box_esp and fade > 0
+			d.Color = config.box_color
+			d.Thickness = config.box_thickness
+			d.Opacity = config.box_opacity * fade
+		elseif d.ClassName == "Text" then
+			d.Visible = config.name_esp and name_text ~= nil and fade > 0
+			if name_text then
+				d.Text = name_text
+			end
+			d.Color = config.name_color
+			d.Size = config.font_size
+			d.Opacity = config.name_opacity * fade
+		end
+	end
+end
+
+local function sync_dynamic_entries()
+	local cam = workspace.CurrentCamera
+	local cam_pos = cam and cam.Position
+	if not cam_pos then return end
+	
+	local seen = {}
+	
+	for obj_id, data in pairs(tracked_objects) do
+		seen[obj_id] = true
+		
+		local obj = data.object
+		if not obj or not obj.Parent then
+			destroy_dynamic_entry(obj_id)
+		else
+			local entry = dynamic_entries[obj_id]
+			if not entry then
+				entry = create_dynamic_entry(obj_id, obj, data.name)
+				if entry then
+					dynamic_entries[obj_id] = entry
+				else
+					continue
+				end
+			end
+			
+			local pos = get_object_position(obj)
+			if not pos then
+				update_dynamic_entry(entry, 0, 0, nil)
+				continue
+			end
+			
+			local dx = pos.X - cam_pos.X
+			local dy = pos.Y - cam_pos.Y
+			local dz = pos.Z - cam_pos.Z
+			local distance = math_sqrt(dx * dx + dy * dy + dz * dz)
+			
+			if distance > config.max_distance then
+				update_dynamic_entry(entry, distance, 0, nil)
+				continue
+			end
+			
+			local fade = calculate_fade_opacity(distance)
+			if fade <= 0 then
+				update_dynamic_entry(entry, distance, 0, nil)
+				continue
+			end
+			
+			local name_text = nil
+			if config.name_esp then
+				local dist_floored = math_floor(distance)
+				if config.distance_esp then
+					name_text = data.name .. " [" .. dist_floored .. "m]"
+				else
+					name_text = data.name
+				end
+			end
+			
+			update_dynamic_entry(entry, distance, fade, name_text)
+		end
+	end
+	
+	for obj_id in pairs(dynamic_entries) do
+		if not seen[obj_id] then
+			destroy_dynamic_entry(obj_id)
+		end
+	end
+end
+
 ---- scan loop ----
 local function scan_loop()
 	while running do
 		if config.enabled then
 			scan_paths()
+			if config.Dynamic then
+				sync_dynamic_entries()
+			end
 		end
 		task_wait(SCAN_INTERVAL)
 	end
@@ -347,7 +588,7 @@ end
 ---- box cache update loop ----
 local function box_cache_loop()
 	while running do
-		if config.enabled and config.box_esp then
+		if config.enabled and config.box_esp and not config.Dynamic then
 			local current_time = os_clock()
 			
 			for obj_id, data in pairs(tracked_objects) do
@@ -379,6 +620,7 @@ end
 local function render_loop()
 	RunService.Render:Connect(function()
 		if not config.enabled then return end
+		if config.Dynamic then return end
 		
 		local prof_start = config.profiling and os_clock()
 		
@@ -632,6 +874,15 @@ function ESP.set_config(key: string, value: any)
 		local fade_range = config.fade_end - config.fade_start
 		fade_range_inv = fade_range > 0 and (1 / fade_range) or 1
 	end
+	
+	if key == "Dynamic" then
+		if value then
+			table_clear(render_data)
+			table_clear(box_cache)
+		else
+			clear_dynamic_entries()
+		end
+	end
 end
 
 function ESP.get_config(key: string): any
@@ -666,6 +917,7 @@ function ESP.stop()
 	table_clear(tracked_objects)
 	table_clear(render_data)
 	table_clear(box_cache)
+	clear_dynamic_entries()
 	print("[ESP] Stopped")
 end
 
