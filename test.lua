@@ -30,7 +30,7 @@ end
 local DEFAULT_CONFIG = {
 	enabled = false,
 	profiling = false,
-	Dynamic = true,
+	Dynamic = false,
 	
 	name_esp = true,
 	distance_esp = true,
@@ -387,7 +387,10 @@ local function destroy_dynamic_entry(obj_id: string)
 	if entry.drawings then
 		for i = 1, #entry.drawings do
 			pcall(function()
-				entry.drawings[i]:Remove()
+				local item = entry.drawings[i]
+				if item and item.obj then
+					item.obj:Remove()
+				end
 			end)
 		end
 	end
@@ -488,8 +491,11 @@ end
 local function update_dynamic_entry(entry, distance: number, fade: number, name_text: string?)
 	for i = 1, #entry.drawings do
 		local item = entry.drawings[i]
-		local d = item.obj
-		local kind = item.kind
+		local d = item and item.obj
+		local kind = item and item.kind
+		if not d or not kind then
+			continue
+		end
 		
 		if kind == "Square" then
 			d.Visible = config.box_esp and fade > 0
