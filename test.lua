@@ -32,6 +32,12 @@ local DEFAULT_CONFIG = {
 	profiling = false,
 	Dynamic = false,
 	
+	scan_budget = 150,
+	scan_interval = 0.1,
+	box_cache_budget = 25,
+	box_cache_interval = 0.5,
+	dynamic_update_interval = 0.05,
+	
 	name_esp = true,
 	distance_esp = true,
 	box_esp = true,
@@ -92,6 +98,14 @@ local frame_count = 0
 local fade_range_inv = 1
 
 local running = false
+local scan_cursor = { path = 1, child = 1 }
+local scan_new_pass = true
+local box_cache_cursor = { keys = {}, index = 1 }
+local last_scan_time = 0
+local last_box_cache_time = 0
+local last_dynamic_update_time = 0
+local scan_connection = nil
+local dynamic_connection = nil
 
 ---- profiling ----
 local profile_times = {
@@ -376,6 +390,87 @@ local function scan_paths()
 	end
 end
 
+local function rebuild_box_cache_keys()
+	table_clear(box_cache_cursor.keys)
+	for obj_id in pairs(tracked_objects) do
+		box_cache_cursor.keys[#box_cache_cursor.keys + 1] = obj_id
+	end
+	box_cache_cursor.index = 1
+end
+
+local function scan_step()
+	if not config.enabled then return end
+	
+	local now = os_clock()
+	if (now - last_scan_time) < config.scan_interval then
+		return
+	end
+	last_scan_time = now
+	
+	if scan_new_pass then
+		table_clear(tracked_objects)
+		rebuild_box_cache_keys()
+		scan_new_pass = false
+	end
+	
+	local budget = config.scan_budget
+	local processed = 0
+	
+	while processed < budget do
+		local path = active_paths[scan_cursor.path]
+		if not path then
+			scan_cursor.path = 1
+			scan_cursor.child = 1
+			scan_new_pass = true
+			break
+		end
+		
+		local children = nil
+		pcall(function()
+			children = path:GetChildren()
+		end)
+		
+		if not children then
+			scan_cursor.path = scan_cursor.path + 1
+			scan_cursor.child = 1
+			processed = processed + 1
+		else
+			local child = children[scan_cursor.child]
+			if not child then
+				scan_cursor.path = scan_cursor.path + 1
+				scan_cursor.child = 1
+				if not active_paths[scan_cursor.path] then
+					scan_cursor.path = 1
+					scan_cursor.child = 1
+					scan_new_pass = true
+					break
+				end
+				processed = processed + 1
+			else
+				if should_track_object(child) then
+					local position = get_object_position(child)
+					if position then
+						local obj_name
+						pcall(function()
+							obj_name = child.Name
+						end)
+						
+						local obj_id = tostring(child)
+						tracked_objects[obj_id] = {
+							object = child,
+							name = obj_name or "Unknown",
+							position = position,
+						}
+					end
+				end
+				
+				scan_cursor.child = scan_cursor.child + 1
+				processed = processed + 1
+			end
+		end
+	end
+end
+
 local function destroy_dynamic_entry(obj_id: string)
 	local entry = dynamic_entries[obj_id]
 	if not entry then return end
@@ -523,6 +618,12 @@ local function update_dynamic_entry(entry, distance: number, fade: number, name_
 end
 
 local function sync_dynamic_entries()
+	local now = os_clock()
+	if (now - last_dynamic_update_time) < config.dynamic_update_interval then
+		return
+	end
+	last_dynamic_update_time = now
+	
 	local cam = workspace.CurrentCamera
 	local cam_pos = cam and cam.Position
 	if not cam_pos then return end
@@ -589,46 +690,51 @@ local function sync_dynamic_entries()
 	end
 end
 
----- scan loop ----
-local function scan_loop()
-	while running do
-		if config.enabled then
-			scan_paths()
-			if config.Dynamic then
-				sync_dynamic_entries()
-			end
-		end
+---- box cache update step ----
+local function box_cache_step()
+	if not config.enabled or not config.box_esp or config.Dynamic then return end
+	
+	local now = os_clock()
+	if (now - last_box_cache_time) < config.box_cache_interval then
+		return
 	end
-end
-
----- box cache update loop ----
-local function box_cache_loop()
-	while running do
-		if config.enabled and config.box_esp and not config.Dynamic then
-			local current_time = os_clock()
-			
-			for obj_id, data in pairs(tracked_objects) do
-				local cache_entry = box_cache[obj_id]
-				
-				if not cache_entry or (current_time - cache_entry.time) > BOX_CACHE_TIME then
-					pcall(function()
-						local obj = data.object
-						if obj and obj.Parent then
-							local corners = get_simple_box_corners(obj)
-							if corners then
-								box_cache[obj_id] = {
-									corners = corners,
-									time = current_time,
-								}
-							end
+	last_box_cache_time = now
+	
+	if #box_cache_cursor.keys == 0 or box_cache_cursor.index > #box_cache_cursor.keys then
+		rebuild_box_cache_keys()
+	end
+	
+	local budget = config.box_cache_budget
+	local processed = 0
+	
+	while processed < budget do
+		local obj_id = box_cache_cursor.keys[box_cache_cursor.index]
+		if not obj_id then
+			break
+		end
+		
+		local data = tracked_objects[obj_id]
+		local cache_entry = box_cache[obj_id]
+		
+		if data then
+			if not cache_entry or (now - cache_entry.time) > BOX_CACHE_TIME then
+				pcall(function()
+					local obj = data.object
+					if obj and obj.Parent then
+						local corners = get_simple_box_corners(obj)
+						if corners then
+							box_cache[obj_id] = {
+								corners = corners,
+								time = now,
+							}
 						end
-					end)
-				end
-				
-				task_wait(0.01)
+					end
+				end)
 			end
 		end
-		task_wait(0.5)
+		
+		box_cache_cursor.index = box_cache_cursor.index + 1
+		processed = processed + 1
 	end
 end
 
@@ -895,6 +1001,7 @@ function ESP.set_config(key: string, value: any)
 		if value then
 			table_clear(render_data)
 			table_clear(box_cache)
+			rebuild_box_cache_keys()
 		else
 			clear_dynamic_entries()
 		end
@@ -926,9 +1033,19 @@ function ESP.start()
 	config.enabled = true
 	running = true
 	frame_count = 0
+	rebuild_box_cache_keys()
 	
-	task_spawn(scan_loop)
-	task_spawn(box_cache_loop)
+	scan_connection = RunService.PostModel:Connect(function()
+		pcall(scan_step)
+		pcall(box_cache_step)
+	end)
+	
+	dynamic_connection = RunService.PostLocal:Connect(function()
+		if config.Dynamic then
+			pcall(sync_dynamic_entries)
+		end
+	end)
+	
 	render_loop()
 	
 	print("[ESP] Started")
@@ -937,9 +1054,18 @@ end
 function ESP.stop()
 	running = false
 	config.enabled = false
+	if scan_connection then
+		scan_connection:Disconnect()
+		scan_connection = nil
+	end
+	if dynamic_connection then
+		dynamic_connection:Disconnect()
+		dynamic_connection = nil
+	end
 	table_clear(tracked_objects)
 	table_clear(render_data)
 	table_clear(box_cache)
+	table_clear(box_cache_cursor.keys)
 	clear_dynamic_entries()
 	print("[ESP] Stopped")
 end
