@@ -598,7 +598,6 @@ local function scan_loop()
 				sync_dynamic_entries()
 			end
 		end
-		task_wait(SCAN_INTERVAL)
 	end
 end
 
