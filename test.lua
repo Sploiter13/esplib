@@ -350,7 +350,7 @@ local function create_dynamic_entry(obj, name)
         box.Color = config.box_color
         box.Thickness = config.box_thickness
         box.Opacity = config.box_opacity
-        drawings[#drawings + 1] = box
+        drawings[#drawings + 1] = { obj = box, kind = "Square" }
         attach[box] = {
             Link = point_box,
             Size = UDim2.fromScale(1, 1),
@@ -371,7 +371,7 @@ local function create_dynamic_entry(obj, name)
             font_value = 2
         end
         text.Font = font_value
-        drawings[#drawings + 1] = text
+        drawings[#drawings + 1] = { obj = text, kind = "Text" }
         attach[text] = {
             Link = point_text,
             Size = UDim2.fromOffset(0, 0),
@@ -399,13 +399,19 @@ end
 
 local function update_dynamic_entry(entry, distance, fade, name_text)
     for i = 1, #entry.drawings do
-        local d = entry.drawings[i]
-        if d.ClassName == "Square" then
+        local item = entry.drawings[i]
+        local d = item and item.obj
+        local kind = item and item.kind
+        if not d or not kind then
+            continue
+        end
+
+        if kind == "Square" then
             d.Visible = config.box_esp and fade > 0
             d.Color = config.box_color
             d.Thickness = config.box_thickness
             d.Opacity = config.box_opacity * fade
-        elseif d.ClassName == "Text" then
+        elseif kind == "Text" then
             d.Visible = config.name_esp and name_text ~= nil and fade > 0
             if name_text then
                 d.Text = name_text
