@@ -106,9 +106,17 @@ local profile_counters = {
 
 ---- functions ----
 local function calculate_fade_opacity(distance: number): number
-	if not config.fade_enabled or distance <= config.fade_start then
+	local fade_enabled = config.fade_enabled
+	local fade_start = config.fade_start
+	local fade_end = config.fade_end
+	
+	if fade_enabled == nil or fade_start == nil or fade_end == nil then
 		return 1
-	elseif distance >= config.fade_end then
+	end
+	
+	if not fade_enabled or distance <= fade_start then
+		return 1
+	elseif distance >= fade_end then
 		return 0
 	end
 	return 1 - ((distance - config.fade_start) * fade_range_inv)
@@ -907,6 +915,13 @@ function ESP.start()
 	if running then
 		print("[ESP] Already running")
 		return
+	end
+	
+	if not config.enabled and config.fade_start == nil then
+		config = deep_copy(DEFAULT_CONFIG)
+		local fade_range = config.fade_end - config.fade_start
+		fade_range_inv = fade_range > 0 and (1 / fade_range) or 1
+		update_local_player()
 	end
 	
 	config.enabled = true
