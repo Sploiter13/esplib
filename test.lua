@@ -202,8 +202,10 @@ local function get_object_position(obj)
                 return part.Position
             end
         end
-        local bb_cframe = obj:GetBoundingBox()
-        if bb_cframe then
+        local ok, bb_cframe = pcall(function()
+            return obj:GetBoundingBox()
+        end)
+        if ok and bb_cframe then
             return bb_cframe.Position
         end
     end
@@ -243,8 +245,10 @@ local function get_box_for_object(obj)
     end
 
     if obj.ClassName == "Model" then
-        local cf, sz = obj:GetBoundingBox()
-        if cf and sz then
+        local ok, cf, sz = pcall(function()
+            return obj:GetBoundingBox()
+        end)
+        if ok and cf and sz then
             return build_box_corners(cf, sz)
         end
         local primary = obj.PrimaryPart
@@ -465,7 +469,8 @@ local function update_dynamic()
     if not config.Dynamic then return end
 
     local now = os_clock()
-    if (now - last_dynamic_update_time) < config.dynamic_update_interval then
+    local interval = config.dynamic_update_interval or DEFAULT_CONFIG.dynamic_update_interval
+    if (now - last_dynamic_update_time) < interval then
         return
     end
     last_dynamic_update_time = now
@@ -715,6 +720,13 @@ end
 
 function ESP.start()
     if config.enabled then return end
+
+    if not config.Dynamic then
+        config = deep_copy(DEFAULT_CONFIG)
+        local fade_range = config.fade_end - config.fade_start
+        fade_range_inv = fade_range > 0 and (1 / fade_range) or 1
+        update_local_player()
+    end
 
     config.enabled = true
 
