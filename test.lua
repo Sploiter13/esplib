@@ -469,7 +469,7 @@ local function update_dynamic()
     if not config.Dynamic then return end
 
     local now = os_clock()
-    local interval = config.dynamic_update_interval or DEFAULT_CONFIG.dynamic_update_interval
+    local interval = (config and config.dynamic_update_interval) or (DEFAULT_CONFIG and DEFAULT_CONFIG.dynamic_update_interval) or 0.05
     if (now - last_dynamic_update_time) < interval then
         return
     end
