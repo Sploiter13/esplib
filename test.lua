@@ -34,11 +34,11 @@ local DEFAULT_CONFIG = {
 	
 	scan_budget = 150,
 	scan_interval = 0.1,
-	scan_stale_passes = 1,
+	scan_stale_time = 1.5,
 	box_cache_budget = 25,
 	box_cache_interval = 0.5,
 	dynamic_update_interval = 0.05,
-	dynamic_stale_passes = 2,
+	dynamic_stale_time = 2.0,
 	
 	name_esp = true,
 	distance_esp = true,
@@ -103,9 +103,9 @@ local fade_range_inv = 1
 local running = false
 local scan_cursor = { path = 1, child = 1 }
 local scan_new_pass = true
-local scan_pass_id = 0
 local box_cache_cursor = { keys = {}, index = 1 }
 local last_scan_time = 0
+local last_prune_time = 0
 local last_box_cache_time = 0
 local last_dynamic_update_time = 0
 local scan_connection = nil
@@ -421,6 +421,29 @@ local function rebuild_box_cache_keys()
 	box_cache_cursor.index = 1
 end
 
+local function prune_tracked(now: number)
+	if (now - last_prune_time) < config.scan_interval then
+		return
+	end
+	last_prune_time = now
+	
+	for obj_id, data in pairs(tracked_objects) do
+		local obj = data.object
+		if not obj or not obj.Parent then
+			tracked_objects[obj_id] = nil
+			box_cache[obj_id] = nil
+			destroy_dynamic_entry(obj_id)
+		else
+			local age = now - (data.last_seen or 0)
+			if age > config.scan_stale_time then
+				tracked_objects[obj_id] = nil
+				box_cache[obj_id] = nil
+				destroy_dynamic_entry(obj_id)
+			end
+		end
+	end
+end
+
 local function scan_step()
 	if not config.enabled then return end
 	
@@ -429,11 +452,6 @@ local function scan_step()
 		return
 	end
 	last_scan_time = now
-	
-	if scan_new_pass then
-		scan_pass_id = scan_pass_id + 1
-		scan_new_pass = false
-	end
 	
 	local budget = config.scan_budget
 	local processed = 0
@@ -444,15 +462,6 @@ local function scan_step()
 			scan_cursor.path = 1
 			scan_cursor.child = 1
 			scan_new_pass = true
-			
-			for obj_id, data in pairs(tracked_objects) do
-				if data.last_pass ~= scan_pass_id and (scan_pass_id - (data.last_pass or 0)) >= config.scan_stale_passes then
-					tracked_objects[obj_id] = nil
-					box_cache[obj_id] = nil
-					destroy_dynamic_entry(obj_id)
-				end
-			end
-			
 			rebuild_box_cache_keys()
 			break
 		end
@@ -475,33 +484,29 @@ local function scan_step()
 					scan_cursor.path = 1
 					scan_cursor.child = 1
 					scan_new_pass = true
+					rebuild_box_cache_keys()
 					break
 				end
 				processed = processed + 1
 			else
 				if should_track_object(child) then
-					local position = get_object_position(child)
-					if position then
-						local obj_name
-						pcall(function()
-							obj_name = child.Name
-						end)
-						
-						local obj_id = tostring(child)
-						local existing = tracked_objects[obj_id]
-						if existing then
-							existing.object = child
-							existing.name = obj_name or existing.name or "Unknown"
-							existing.position = position
-							existing.last_pass = scan_pass_id
-						else
-							tracked_objects[obj_id] = {
-								object = child,
-								name = obj_name or "Unknown",
-								position = position,
-								last_pass = scan_pass_id,
-							}
-						end
+					local obj_name
+					pcall(function()
+						obj_name = child.Name
+					end)
+					
+					local obj_id = tostring(child)
+					local existing = tracked_objects[obj_id]
+					if existing then
+						existing.object = child
+						existing.name = obj_name or existing.name or "Unknown"
+						existing.last_seen = now
+					else
+						tracked_objects[obj_id] = {
+							object = child,
+							name = obj_name or "Unknown",
+							last_seen = now,
+						}
 					end
 				end
 				
@@ -510,6 +515,8 @@ local function scan_step()
 			end
 		end
 	end
+	
+	prune_tracked(now)
 end
 
 local function destroy_dynamic_entry(obj_id: string)
@@ -672,11 +679,7 @@ local function sync_dynamic_entries()
 	local local_pos = get_local_position()
 	if not local_pos then return end
 	
-	local seen = {}
-	
 	for obj_id, data in pairs(tracked_objects) do
-		seen[obj_id] = true
-		
 		local obj = data.object
 		if not obj or not obj.Parent then
 			destroy_dynamic_entry(obj_id)
@@ -747,14 +750,16 @@ local function sync_dynamic_entries()
 		end
 	end
 	
+	local now2 = os_clock()
 	for obj_id, entry in pairs(dynamic_entries) do
-		if not seen[obj_id] then
-			entry.miss_count = (entry.miss_count or 0) + 1
-			if entry.miss_count >= config.dynamic_stale_passes then
+		local tracked = tracked_objects[obj_id]
+		if not tracked then
+			local age = now2 - (entry.last_seen or now2)
+			if age > config.dynamic_stale_time then
 				destroy_dynamic_entry(obj_id)
 			end
 		else
-			entry.miss_count = 0
+			entry.last_seen = now2
 		end
 	end
 end
